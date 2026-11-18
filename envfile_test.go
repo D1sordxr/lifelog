@@ -65,8 +65,53 @@ func TestLoadConfigFromEnvFile(t *testing.T) {
 	if _, err := loadConfig(false); err == nil {
 		t.Error("BOT_TOKEN without ALLOWED_USERS must fail")
 	}
-	os.WriteFile(path, []byte("BOT_TOKEN=\nALLOWED_USERS=\n"), 0o600)
+	os.WriteFile(path, []byte("BOT_TOKEN=\nALLOWED_USERS=\nALLOW_NO_AUTH=1\n"), 0o600)
 	if c, err := loadConfig(false); err != nil || c.BotToken != "" {
 		t.Errorf("empty values = defaults: %+v %v", c, err)
+	}
+}
+
+func TestLoadConfigRequiresAuth(t *testing.T) {
+	t.Setenv("ENV_FILE", filepath.Join(t.TempDir(), "absent.env"))
+	for _, k := range envKeys {
+		t.Setenv(k, "")
+	}
+	if _, err := loadConfig(false); err == nil || !strings.Contains(err.Error(), "ALLOW_NO_AUTH=1") {
+		t.Fatalf("запуск без входа: %v", err)
+	}
+	if _, err := loadConfig(true); err != nil {
+		t.Fatalf("служебная команда: %v", err)
+	}
+	t.Setenv("BASIC_AUTH_USER", "fixture")
+	if _, err := loadConfig(false); err == nil {
+		t.Fatal("одного имени недостаточно")
+	}
+	t.Setenv("BASIC_AUTH_PASS", "fixture")
+	if _, err := loadConfig(false); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BASIC_AUTH_PASS", "")
+	t.Setenv("ALLOW_NO_AUTH", "0")
+	if _, err := loadConfig(false); err == nil {
+		t.Fatal("ALLOW_NO_AUTH=0 не разрешает запуск")
+	}
+	t.Setenv("ALLOW_NO_AUTH", "1")
+	if _, err := loadConfig(false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpdateEnvDuplicates(t *testing.T) {
+	raw := []byte("TZ=UTC\nexport TZ = 'Asia/Tokyo'\nTZ = Europe/Berlin\n# сохранить комментарий\n")
+	order := []string{"TZ"}
+	updated := updateEnvFile(raw, map[string]string{"TZ": "Europe/Moscow"}, order)
+	if got := parseEnvFile(updated)["TZ"]; got != "Europe/Moscow" {
+		t.Fatalf("TZ = %q", got)
+	}
+	for _, data := range [][]byte{raw, updated} {
+		out := updateEnvFile(data, map[string]string{"TZ": "-"}, order)
+		if _, ok := parseEnvFile(out)["TZ"]; ok || !strings.Contains(string(out), "# сохранить комментарий") {
+			t.Fatalf("не все дубли отключены: %s", out)
+		}
 	}
 }

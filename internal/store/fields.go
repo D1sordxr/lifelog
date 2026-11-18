@@ -91,7 +91,7 @@ var Fields = []Field{
 	{
 		Name: "report",
 		Set: func(d *Day, v string, _ *time.Location, _ time.Time) error {
-			d.Report = strings.TrimRight(strings.ReplaceAll(v, "\r\n", "\n"), " \t\n")
+			d.Report = strings.ReplaceAll(v, "\r\n", "\n")
 			return nil
 		},
 		Get: func(d *Day, _ *time.Location) string { return d.Report },
@@ -134,40 +134,47 @@ func (d *Days) SetField(ctx context.Context, id int64, name, value string) (*Day
 	if !ok {
 		return nil, &InputError{fmt.Errorf("неизвестное поле %q", name)}
 	}
-	day, err := d.Get(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if err := f.Set(day, value, d.s.loc, d.s.now()); err != nil {
-		return nil, &InputError{err}
-	}
-	if err := d.Save(ctx, day); err != nil {
-		return nil, err
-	}
-	return day, nil
+	return d.edit(ctx, id, func(day *Day, now time.Time) error {
+		return f.Set(day, value, d.s.loc, now)
+	})
 }
 
 // SetFields меняет несколько полей за раз (сохранение формы без JS).
 // Поля, которых нет в values, не трогаются.
 func (d *Days) SetFields(ctx context.Context, id int64, values map[string]string) (*Day, error) {
-	day, err := d.Get(ctx, id)
+	return d.edit(ctx, id, func(day *Day, now time.Time) error {
+		for _, f := range Fields {
+			if v, ok := values[f.Name]; ok {
+				if err := f.Set(day, v, d.s.loc, now); err != nil {
+					return fmt.Errorf("%s: %w", f.Name, err)
+				}
+			}
+		}
+		return nil
+	})
+}
+
+func (d *Days) edit(ctx context.Context, id int64, apply func(*Day, time.Time) error) (*Day, error) {
+	tx, err := d.s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	day, err := d.get(ctx, tx, id)
 	if err != nil {
 		return nil, err
 	}
 	now := d.s.now()
-	for _, f := range Fields {
-		v, ok := values[f.Name]
-		if !ok {
-			continue
-		}
-		if err := f.Set(day, v, d.s.loc, now); err != nil {
-			return nil, &InputError{fmt.Errorf("%s: %w", f.Name, err)}
-		}
+	if err := apply(day, now); err != nil {
+		return nil, &InputError{err}
 	}
-	if err := d.Save(ctx, day); err != nil {
+	if err := day.Validate(); err != nil {
+		return nil, &InputError{err}
+	}
+	if err := updateDay(ctx, tx, d.uid, day, now); err != nil {
 		return nil, err
 	}
-	return day, nil
+	return day, tx.Commit()
 }
 
 func parseTime(v string, loc *time.Location, now time.Time) (*time.Time, error) {

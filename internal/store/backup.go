@@ -25,18 +25,37 @@ func (s *Store) DailyBackup(ctx context.Context, dir string, keep int) (string, 
 	target := filepath.Join(dir, "lifelog-"+s.now().In(s.loc).Format("2006-01-02")+".db")
 	created := ""
 	if _, err := os.Stat(target); os.IsNotExist(err) {
-		tmp := target + ".tmp"
-		os.Remove(tmp)
-		if err := s.BackupTo(ctx, tmp); err != nil {
-			os.Remove(tmp)
-			return "", fmt.Errorf("backup: %w", err)
-		}
-		if err := os.Rename(tmp, target); err != nil {
+		created, err = s.createDailyBackup(ctx, target)
+		if err != nil {
 			return "", err
 		}
-		created = target
+	} else if err != nil {
+		return "", err
 	}
 	return created, pruneBackups(dir, keep)
+}
+
+func (s *Store) createDailyBackup(ctx context.Context, target string) (string, error) {
+	file, err := os.CreateTemp(filepath.Dir(target), ".lifelog-backup-*")
+	if err != nil {
+		return "", err
+	}
+	tmp := file.Name()
+	defer os.Remove(tmp)
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+	if err := s.BackupTo(ctx, tmp); err != nil {
+		return "", fmt.Errorf("backup: %w", err)
+	}
+	// Публикуем готовую копию атомарно, сохраняя уже опубликованную другим процессом.
+	if err := os.Link(tmp, target); err != nil {
+		if os.IsExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return target, nil
 }
 
 func pruneBackups(dir string, keep int) error {
@@ -49,7 +68,7 @@ func pruneBackups(dir string, keep int) error {
 	}
 	sort.Strings(files) // дата в имени → лексикографический порядок = хронологический
 	for len(files) > keep {
-		if err := os.Remove(files[0]); err != nil {
+		if err := os.Remove(files[0]); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		files = files[1:]

@@ -193,7 +193,7 @@ func TestTelegramAuth(t *testing.T) {
 	}
 
 	// Ссылка на скачивание для Telegram.WebApp.downloadFile.
-	_, body = e.req("POST", "/auth/download", owner, url.Values{}, nil)
+	_, body = e.req("POST", "/auth/download", owner, url.Values{"format": {"md"}}, nil)
 	var j struct{ Token string }
 	json.Unmarshal([]byte(body), &j)
 	if resp, body := e.req("GET", "/export.md?dl="+url.QueryEscape(j.Token), "", nil, nil); resp.StatusCode != 200 || !strings.Contains(body, "секрет владельца") {
@@ -300,6 +300,7 @@ func TestPINGate(t *testing.T) {
 
 	// Разблокировка скользящая: запросы продлевают, простой 10 минут — блокирует.
 	unlocked = e.login(111, "")
+	sess = strings.Split(unlocked, "; ")[0]
 	for i := 0; i < 3; i++ {
 		e.now = e.now.Add(8 * time.Minute)
 		resp, body := e.req("GET", "/", unlocked, nil, nil)

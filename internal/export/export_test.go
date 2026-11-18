@@ -124,7 +124,7 @@ func TestMarkdownAndJSON(t *testing.T) {
 		"| 2026-11-17 Вт | 07:15 | 00:40 (18.11) | 7:45 | — | 3 |",
 		"| 2026-11-18 Ср | 08:00 | — | 7:20 |",
 		"бег, с 18:00, 45 мин",
-		"### 2026-11-17 Вт\n\nМногострочный\nотчёт | с чертой",
+		"### 2026-11-17 Вт\n\n    Многострочный\n    отчёт | с чертой",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("markdown lacks %q:\n%s", want, out)
@@ -182,4 +182,36 @@ func eqT(a, b *time.Time) bool { return (a == nil) == (b == nil) && (a == nil ||
 func eqI(a, b *int) bool       { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
 func eqD(a, b *time.Duration) bool {
 	return (a == nil) == (b == nil) && (a == nil || *a == *b)
+}
+
+func TestCSVColumnLimitsAndReportWhitespace(t *testing.T) {
+	if _, _, err := ParseCSV(strings.NewReader("wake_at, WAKE_AT\n"), tz); err == nil {
+		t.Fatal("дубли заголовков приняты")
+	}
+	if _, issues, err := ParseCSV(strings.NewReader("date;wake_at;report\n2026-11-18;08:00;начало;хвост\n"), tz); err != nil || len(issues) != 1 {
+		t.Fatalf("лишняя колонка: %v %v", issues, err)
+	}
+	s := openTest(t)
+	importCSV(t, s, "date,wake_at,report\n2026-11-18,08:00,\"  Отчёт  \n\"\n")
+	got, err := s.For(1).Latest(context.Background())
+	if err != nil || got.Report != "  Отчёт  \n" {
+		t.Fatalf("пробелы отчёта: %+v %v", got, err)
+	}
+}
+
+func TestMarkdownUserFieldsAreText(t *testing.T) {
+	entries := []store.Entry{{Day: store.Day{
+		WakeAt:    time.Date(2026, 11, 18, 7, 0, 0, 0, tz),
+		TrainType: "[ссылка](https://example.invalid)|\n<em>тип</em>",
+		Report:    "## Строка\r<img>\n[ссылка](https://example.invalid)",
+	}}}
+	var b bytes.Buffer
+	if err := WriteMarkdown(&b, entries, tz); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "&#91;ссылка&#93;&#40;https&#58;&#47;&#47;example&#46;invalid&#41;&#124; &#60;em&#62;") ||
+		!strings.Contains(out, "\n    ## Строка\n    <img>\n    [ссылка](https://example.invalid)\n") {
+		t.Fatalf("поля должны остаться текстом:\n%s", out)
+	}
 }

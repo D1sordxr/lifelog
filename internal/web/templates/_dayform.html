@@ -1,5 +1,5 @@
 {{define "dayform"}}{{$v := .Day.Values}}
-<form class="day" method="post" action="/days/{{.Day.ID}}" data-id="{{.Day.ID}}">
+<form class="day" method="post" action="/days/{{.Day.ID}}" data-id="{{.Day.ID}}" data-user-id="{{.Day.UserID}}">
   <input type="hidden" name="back" value="{{if .Day.ShowBed}}/days/{{.Day.ID}}{{else}}/{{end}}">
 
   <div class="field">

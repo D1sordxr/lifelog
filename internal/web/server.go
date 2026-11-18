@@ -6,9 +6,12 @@ import (
 	"crypto/subtle"
 	"embed"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"html/template"
 	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -121,7 +124,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if v := recover(); v != nil {
 			log.Printf("panic %s %s: %v", r.Method, r.URL.Path, v)
-			http.Error(w, "внутренняя ошибка", http.StatusInternalServerError)
+			http.Error(w, internalError, http.StatusInternalServerError)
 		}
 	}()
 	if err := s.cop.Check(r); err != nil {
@@ -182,6 +185,7 @@ type page struct {
 	Active string
 	Data   any
 	Bare   bool   // без навигации (вход, PIN)
+	Login  bool   // экран входа без сессии
 	TG     bool   // подключить telegram-web-app.js
 	Script string // скрипт страницы, по умолчанию app.js
 }
@@ -189,17 +193,16 @@ type page struct {
 func (s *Server) render(w http.ResponseWriter, status int, name string, p page) {
 	t, ok := s.pages[name]
 	if !ok {
-		http.Error(w, "no template "+name, http.StatusInternalServerError)
+		s.fail(w, errors.New("нет шаблона "+name))
 		return
 	}
 	p.TG = s.tgMode()
-	if p.Script == "" {
+	if p.Script == "" && !p.Login {
 		p.Script = "app.js"
 	}
 	var b strings.Builder
 	if err := t.ExecuteTemplate(&b, "layout", p); err != nil {
-		log.Printf("render %s: %v", name, err)
-		http.Error(w, "ошибка шаблона", http.StatusInternalServerError)
+		s.fail(w, fmt.Errorf("render %s: %w", name, err))
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -208,7 +211,31 @@ func (s *Server) render(w http.ResponseWriter, status int, name string, p page) 
 	w.Write([]byte(b.String()))
 }
 
+const internalError = "внутренняя ошибка"
+
+func (s *Server) logError(err error) { log.Printf("error: %v", err) }
+
 func (s *Server) fail(w http.ResponseWriter, err error) {
-	log.Printf("error: %v", err)
-	http.Error(w, "ошибка: "+err.Error(), http.StatusInternalServerError)
+	s.logError(err)
+	http.Error(w, internalError, http.StatusInternalServerError)
+}
+
+// readSmallForm ограничивает тело до разбора и не принимает multipart.
+func readSmallForm(w http.ResponseWriter, r *http.Request, limit int64) bool {
+	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || media != "application/x-www-form-urlencoded" {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]any{"error": "ожидается форма"})
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	if err := r.ParseForm(); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "форма слишком большая"})
+		} else {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "не удалось прочитать форму"})
+		}
+		return false
+	}
+	return true
 }

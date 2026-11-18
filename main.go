@@ -33,7 +33,7 @@ import (
 // Все они также читаются из env-файла (ENV_FILE; у службы Windows —
 // %ProgramData%\lifelog\lifelog.env).
 var envKeys = []string{"ADDR", "DB_PATH", "TZ", "BACKUP_DIR", "BACKUP_KEEP", "BASIC_AUTH_USER", "BASIC_AUTH_PASS",
-	"BOT_TOKEN", "ALLOWED_USERS", "WEBAPP_URL"}
+	"BOT_TOKEN", "ALLOWED_USERS", "WEBAPP_URL", "ALLOW_NO_AUTH"}
 
 type config struct {
 	Addr       string
@@ -86,6 +86,9 @@ func loadConfig(admin bool) (config, error) {
 			c.BackupDir = env("BACKUP_DIR", filepath.Join(filepath.Dir(c.DBPath), "backups"))
 		}
 	}
+	if !admin && c.BotToken == "" && (c.AuthUser == "" || c.AuthPass == "") && getenv("ALLOW_NO_AUTH") != "1" {
+		return c, errors.New("вход не настроен: задай BOT_TOKEN и ALLOWED_USERS или обе настройки BASIC_AUTH; для локальной разработки явно задай ALLOW_NO_AUTH=1")
+	}
 	if c.BotToken != "" && c.Allowed.Len() == 0 {
 		return c, fmt.Errorf("BOT_TOKEN задан, а ALLOWED_USERS пуст — войти не сможет никто")
 	}
@@ -121,6 +124,14 @@ func main() {
 		return
 	}
 
+	switch cmd {
+	case "-h", "--help", "help":
+		fmt.Println("usage: lifelog [backup | reset-pin <telegram id> | install | uninstall]")
+		return
+	case "", "backup", "reset-pin":
+	default:
+		log.Fatalf("unknown command %q", cmd)
+	}
 	cfg, err := loadConfig(cmd == "backup" || cmd == "reset-pin")
 	if err != nil {
 		log.Fatal(err)
@@ -132,11 +143,6 @@ func main() {
 		err = backupOnce(cfg)
 	case "reset-pin":
 		err = resetPIN(cfg, os.Args[2:])
-	case "-h", "--help", "help":
-		fmt.Println("usage: lifelog [backup | reset-pin <telegram id> | install | uninstall]")
-		return
-	default:
-		err = fmt.Errorf("unknown command %q", cmd)
 	}
 	if err != nil {
 		log.Fatal(err)
@@ -184,6 +190,8 @@ func run(ctx context.Context, cfg config) error {
 			BotToken: cfg.BotToken, Allow: cfg.Allowed,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       5 * time.Minute,  // импорт до 20 МБ, в том числе с медленного соединения
+		WriteTimeout:      10 * time.Minute, // включает чтение тела и обработку импорта
 		IdleTimeout:       2 * time.Minute,
 	}
 	errc := make(chan error, 1)

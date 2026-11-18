@@ -1,10 +1,14 @@
 package web
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,9 +17,7 @@ import (
 
 // PIN — второй барьер после входа через Telegram, как экран блокировки iPhone.
 //
-// Обойти нельзя:
-//   - всё, кроме POST /pin и /pin/lock, требует cookie разблокировки — она подписана
-//     ключом сервера и привязана к пользователю (чужую или поддельную не принять);
+//   - cookie разблокировки привязана к сессии и версии PIN;
 //   - разблокировка живёт unlockIdle с последнего запроса, потом снова нужен PIN;
 //   - PIN проверяется только на сервере; счётчик попыток и блокировка хранятся в
 //     базе у пользователя — новая сессия или очистка cookies их не сбрасывают;
@@ -26,6 +28,7 @@ import (
 const (
 	unlockCookie = "lifelog_unlock"
 	unlockIdle   = 10 * time.Minute
+	pinFormLimit = 1 << 10
 )
 
 type pinData struct {
@@ -36,8 +39,8 @@ type pinData struct {
 // pinGate пропускает запрос, если PIN задан и сессия разблокирована;
 // иначе отдаёт экран PIN (или 401 для API).
 func (s *Server) pinGate(w http.ResponseWriter, r *http.Request, u *store.User) (*http.Request, bool) {
-	if r.Method == http.MethodPost && (r.URL.Path == "/pin" || r.URL.Path == "/pin/lock") {
-		return r, true // обработчики сами проверяют PIN
+	if r.Method == http.MethodPost && r.URL.Path == "/pin" {
+		return r, true // обработчик сам проверяет PIN
 	}
 	st, err := s.st.PINStatus(r.Context(), u.ID)
 	if err != nil {
@@ -47,8 +50,14 @@ func (s *Server) pinGate(w http.ResponseWriter, r *http.Request, u *store.User) 
 	now := s.opt.Now()
 	if st.Set {
 		if c, err := r.Cookie(unlockCookie); err == nil {
-			if uid, err := s.verifyToken("unlock", c.Value, now); err == nil && uid == u.ID {
-				s.setUnlock(w, u.ID) // скользящий срок
+			sess := sessionFrom(r)
+			if uid, err := s.verifyToken("unlock", c.Value, now, unlockBinding(sess.token, st.Version)); err == nil && uid == u.ID {
+				if r.Method == http.MethodPost && r.URL.Path == "/pin/lock" {
+					sess.pinVersion = st.Version
+					r = r.WithContext(context.WithValue(r.Context(), sessionContextKey{}, sess))
+				} else if r.Method != http.MethodPost || r.URL.Path != "/pin/change" {
+					s.setUnlock(w, r, u.ID, st.Version) // скользящий срок
+				}
 				return r, true
 			}
 		}
@@ -62,9 +71,15 @@ func (s *Server) pinGate(w http.ResponseWriter, r *http.Request, u *store.User) 
 	return r, false
 }
 
-func (s *Server) setUnlock(w http.ResponseWriter, uid int64) {
+func unlockBinding(token string, version int64) string {
+	hash := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(hash[:]) + "|" + strconv.FormatInt(version, 10)
+}
+
+func (s *Server) setUnlock(w http.ResponseWriter, r *http.Request, uid, version int64) {
+	binding := unlockBinding(sessionFrom(r).token, version)
 	http.SetCookie(w, &http.Cookie{
-		Name: unlockCookie, Value: s.signToken("unlock", uid, s.opt.Now().Add(unlockIdle)),
+		Name: unlockCookie, Value: s.signToken("unlock", uid, s.opt.Now().Add(unlockIdle), binding),
 		Path: "/", MaxAge: int(unlockIdle / time.Second),
 		HttpOnly: true, Secure: true, SameSite: http.SameSiteNoneMode, Partitioned: true,
 	})
@@ -77,19 +92,23 @@ func (s *Server) pinSubmit(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if !readSmallForm(w, r, pinFormLimit) {
+		return
+	}
 	ctx := r.Context()
-	pin := r.PostFormValue("pin")
+	pin := r.PostForm.Get("pin")
 	st, err := s.st.PINStatus(ctx, u.ID)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
 	if !st.Set {
-		if pin != r.PostFormValue("pin2") {
+		if pin != r.PostForm.Get("pin2") {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "PIN не совпадает"})
 			return
 		}
-		switch err := s.st.SetPIN(ctx, u.ID, pin); {
+		version, err := s.st.SetPIN(ctx, u.ID, pin)
+		switch {
 		case errors.Is(err, store.ErrPINFormat):
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
@@ -100,13 +119,13 @@ func (s *Server) pinSubmit(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, err)
 			return
 		}
-		s.setUnlock(w, u.ID)
+		s.setUnlock(w, r, u.ID, version)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
 
-	okPIN, left, err := s.st.CheckPIN(ctx, u.ID, pin)
-	s.pinResult(w, r, u, okPIN, left, err)
+	result, err := s.st.CheckPIN(ctx, u.ID, pin)
+	s.pinResult(w, r, u, result, err)
 }
 
 // pinChangePage — GET /pin/change (только из разблокированной сессии).
@@ -126,22 +145,25 @@ func (s *Server) pinChange(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	pin := r.PostFormValue("pin")
-	if pin != r.PostFormValue("pin2") {
+	if !readSmallForm(w, r, pinFormLimit) {
+		return
+	}
+	pin := r.PostForm.Get("pin")
+	if pin != r.PostForm.Get("pin2") {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Новый PIN не совпадает", "step": "new"})
 		return
 	}
-	okPIN, left, err := s.st.ChangePIN(r.Context(), u.ID, r.PostFormValue("old"), pin)
+	result, err := s.st.ChangePIN(r.Context(), u.ID, r.PostForm.Get("old"), pin)
 	switch {
 	case errors.Is(err, store.ErrPINFormat), errors.Is(err, store.ErrPINSame):
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "step": "new"})
 		return
 	}
-	s.pinResult(w, r, u, okPIN, left, err)
+	s.pinResult(w, r, u, result, err)
 }
 
 // pinResult — общий ответ на проверку PIN: блокировка, неверный, успех.
-func (s *Server) pinResult(w http.ResponseWriter, r *http.Request, u *store.User, okPIN bool, left int, err error) {
+func (s *Server) pinResult(w http.ResponseWriter, r *http.Request, u *store.User, result store.PINCheck, err error) {
 	ctx := r.Context()
 	var locked *store.PINLockedError
 	tooMany := func(prefix string, until time.Time) {
@@ -155,32 +177,50 @@ func (s *Server) pinResult(w http.ResponseWriter, r *http.Request, u *store.User
 	switch {
 	case errors.As(err, &locked):
 		tooMany("Слишком много попыток. ", locked.Until)
+	case errors.Is(err, store.ErrPINChanged):
+		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "locked": true})
 	case err != nil:
 		s.fail(w, err)
-	case !okPIN && left == 0:
+	case !result.OK && result.Left == 0:
 		// эта ошибка включила блокировку — сразу сообщаем
 		if st, err := s.st.PINStatus(ctx, u.ID); err == nil && st.LockedUntil.After(s.opt.Now()) {
 			tooMany("Неверный PIN. ", st.LockedUntil)
 			return
 		}
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "Неверный PIN", "left": 0})
-	case !okPIN:
+	case !result.OK:
 		msg := "Неверный PIN"
-		if left > 0 {
-			msg += fmt.Sprintf(" (осталось попыток: %d)", left)
+		if result.Left > 0 {
+			msg += fmt.Sprintf(" (осталось попыток: %d)", result.Left)
 		}
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": msg, "left": left})
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": msg, "left": result.Left})
 	default:
-		s.setUnlock(w, u.ID)
+		s.setUnlock(w, r, u.ID, result.Version)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}
 }
 
-// pinLock — POST /pin/lock: заблокировать сейчас.
+// pinLock — POST /pin/lock: отозвать разблокировки во всех сессиях.
 func (s *Server) pinLock(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: unlockCookie, Value: "", Path: "/", MaxAge: -1,
-		HttpOnly: true, Secure: true, SameSite: http.SameSiteNoneMode, Partitioned: true})
+	u, ok := r.Context().Value(userKey{}).(*store.User)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if !readSmallForm(w, r, pinFormLimit) {
+		return
+	}
+	if err := s.st.LockPIN(r.Context(), u.ID, sessionFrom(r).pinVersion); err != nil {
+		s.fail(w, err)
+		return
+	}
+	clearUnlock(w)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func clearUnlock(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: unlockCookie, Path: "/", MaxAge: -1,
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteNoneMode, Partitioned: true})
 }
 
 func humanWait(d time.Duration) string {

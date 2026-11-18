@@ -7,7 +7,7 @@ import (
 
 // Allowlist — кому разрешён вход. Записи — Telegram id (число) или username
 // (с @ или без). Пользователь проходит, если совпал id ИЛИ username.
-// Первая запись — владелец: при первом входе ему достаются записи,
+// Первый элемент списка должен быть числовым ID владельца. Ему достаются записи,
 // сделанные до включения Telegram.
 type Allowlist struct {
 	entries []entry
@@ -61,9 +61,9 @@ func (a Allowlist) Allowed(id int64, username string) bool {
 	return false
 }
 
-// IsOwner — совпадает ли пользователь с первой записью списка.
-func (a Allowlist) IsOwner(id int64, username string) bool {
-	return len(a.entries) > 0 && a.entries[0].match(id, username)
+// IsOwner — совпадает ли Telegram ID с первой, числовой записью списка.
+func (a Allowlist) IsOwner(id int64) bool {
+	return id > 0 && len(a.entries) > 0 && a.entries[0].id == id
 }
 
 // Len — число записей.

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -216,5 +217,168 @@ func TestDailyBackup(t *testing.T) {
 	defer b.Close()
 	if n, _ := b.For(1).Count(ctx); n != 1 {
 		t.Fatalf("в копии %d дней", n)
+	}
+}
+
+// Первый запрос остановлен после чтения состояния. Второй либо ждёт
+// транзакцию, либо уже успел прочитать старое состояние и дойти до записи.
+func overlapWrites(t *testing.T, s *Store, at time.Time, first, second func() error) {
+	t.Helper()
+	reached := make(chan struct{}, 2)
+	release := make(chan struct{})
+	s.SetClock(func() time.Time {
+		reached <- struct{}{}
+		<-release
+		return at
+	})
+	errs := make(chan error, 2)
+	waitCount := s.db.Stats().WaitCount
+	go func() { errs <- first() }()
+	select {
+	case <-reached:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("первый запрос не дошёл до записи")
+	}
+	go func() { errs <- second() }()
+	deadline := time.After(5 * time.Second)
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+wait:
+	for s.db.Stats().WaitCount == waitCount {
+		select {
+		case <-reached:
+			break wait
+		case <-tick.C:
+		case <-deadline:
+			close(release)
+			t.Fatal("второй запрос не начал запись")
+		}
+	}
+	close(release)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func TestConcurrentDayEdits(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	days := s.For(OwnerID)
+	at := lt("2026-11-18 07:00")
+	day, err := days.Wake(ctx, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlapWrites(t, s, at, func() error {
+		_, err := days.SetField(ctx, day.ID, "report", "Запись")
+		return err
+	}, func() error {
+		_, err := days.SetField(ctx, day.ID, "energy", "4")
+		return err
+	})
+	got, err := days.Get(ctx, day.ID)
+	if err != nil || got.Report != "Запись" || got.Energy == nil || *got.Energy != 4 {
+		t.Fatalf("одна из записей потеряна: %+v %v", got, err)
+	}
+	overlapWrites(t, s, at, func() error {
+		return days.Bed(ctx, day.ID, at.Add(10*time.Hour))
+	}, func() error {
+		_, err := days.SetFields(ctx, day.ID, map[string]string{"train_type": "Тренировка"})
+		return err
+	})
+	if err := days.Bed(ctx, day.ID, at.Add(11*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	got, err = days.Get(ctx, day.ID)
+	if err != nil || got.BedAt == nil || !got.BedAt.Equal(at.Add(10*time.Hour)) || got.TrainType != "Тренировка" {
+		t.Fatalf("отбой перезаписан или поле потеряно: %+v %v", got, err)
+	}
+}
+
+func TestConcurrentWake(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	days := s.For(OwnerID)
+	at := lt("2026-11-18 07:00")
+	wake := func() error { _, err := days.Wake(ctx, at); return err }
+	overlapWrites(t, s, at, wake, wake)
+	if n, err := days.Count(ctx); err != nil || n != 1 {
+		t.Fatalf("двойной подъём: %d записей, %v", n, err)
+	}
+}
+
+func TestNavigationAtEqualWakeTime(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	days := s.For(OwnerID)
+	at := lt("2026-11-18 07:00")
+	a, err := days.Wake(ctx, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := days.Wake(ctx, at.Add(4*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err = days.SetField(ctx, b.ID, "wake_at", at.Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prev, err := days.Prev(ctx, b); err != nil || prev == nil || prev.ID != a.ID {
+		t.Fatalf("предыдущий день: %+v %v", prev, err)
+	}
+	if next, err := days.Next(ctx, a); err != nil || next == nil || next.ID != b.ID {
+		t.Fatalf("следующий день: %+v %v", next, err)
+	}
+	if _, err := days.Import(ctx, []ImportRow{{Line: 2, WakeAt: at, Values: map[string]string{"report": "Импорт"}}}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := days.Range(ctx, zeroT, zeroT)
+	if err != nil || len(entries) != 2 || entries[0].ID != a.ID || entries[0].Report != "Импорт" || entries[1].Report != "" {
+		t.Fatalf("импорт должен выбрать ранний день с меньшим id: %+v %v", entries, err)
+	}
+}
+
+func TestConcurrentBackupPublication(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "data.db")
+	a, err := Open(db, tz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := Open(db, tz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "test.db")
+	type result struct {
+		path string
+		err  error
+	}
+	results := make(chan result, 2)
+	for _, st := range []*Store{a, b} {
+		go func() {
+			path, err := st.createDailyBackup(context.Background(), target)
+			results <- result{path, err}
+		}()
+	}
+	created := 0
+	for range 2 {
+		res := <-results
+		if res.err != nil {
+			t.Error(res.err)
+		}
+		if res.path == target {
+			created++
+		}
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil || created != 1 || len(files) != 1 || files[0].Name() != "test.db" {
+		t.Fatalf("дневная копия: создано %d, файлов %d, ошибка %v", created, len(files), err)
 	}
 }

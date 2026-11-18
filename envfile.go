@@ -22,6 +22,7 @@ WEBAPP_URL=
 # BACKUP_KEEP=30
 # BASIC_AUTH_USER=
 # BASIC_AUTH_PASS=
+# ALLOW_NO_AUTH=
 `
 
 var fileEnv = map[string]string{}
@@ -55,23 +56,28 @@ func envLines(data []byte) []string {
 	return strings.Split(strings.TrimRight(s, "\n"), "\n")
 }
 
+func parseEnvLine(line string) (key, value string, commented bool) {
+	line = strings.TrimSpace(line)
+	commented = strings.HasPrefix(line, "#")
+	line = strings.TrimSpace(strings.TrimPrefix(line, "#"))
+	line = strings.TrimPrefix(line, "export ")
+	key, value, ok := strings.Cut(line, "=")
+	if !ok {
+		return "", "", commented
+	}
+	key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+	if len(value) >= 2 && (value[0] == '"' && value[len(value)-1] == '"' || value[0] == '\'' && value[len(value)-1] == '\'') {
+		value = value[1 : len(value)-1]
+	}
+	return key, value, commented
+}
+
 func parseEnvFile(data []byte) map[string]string {
 	out := map[string]string{}
 	for _, line := range envLines(data) {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+		if k, v, commented := parseEnvLine(line); k != "" && !commented {
+			out[k] = v
 		}
-		line = strings.TrimPrefix(line, "export ")
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		v = strings.TrimSpace(v)
-		if len(v) >= 2 && (v[0] == '"' && v[len(v)-1] == '"' || v[0] == '\'' && v[len(v)-1] == '\'') {
-			v = v[1 : len(v)-1]
-		}
-		out[strings.TrimSpace(k)] = v
 	}
 	return out
 }
@@ -84,43 +90,37 @@ func updateEnvFile(data []byte, set map[string]string, order []string) []byte {
 	if len(data) == 0 {
 		lines = nil
 	}
-	keyOf := func(line string) (string, bool) {
-		t := strings.TrimSpace(line)
-		commented := strings.HasPrefix(t, "#")
-		t = strings.TrimSpace(strings.TrimPrefix(t, "#"))
-		k, _, ok := strings.Cut(t, "=")
-		if !ok || strings.ContainsAny(k, " \t") {
-			return "", commented
-		}
-		return k, commented
-	}
 	for _, k := range order {
 		v, ok := set[k]
 		if !ok {
 			continue
 		}
-		newLine := k + "=" + v
+		newLine, disabled := k+"="+v, "# "+k+"="
 		if v == "-" {
-			newLine = "# " + k + "="
+			newLine = disabled
 		}
-		idx := -1
-		for i, l := range lines { // сначала действующая строка, потом закомментированная
-			if key, commented := keyOf(l); key == k && !commented {
-				idx = i
-				break
+		first, commentedLine := -1, -1
+		for i, line := range lines {
+			key, _, commented := parseEnvLine(line)
+			if key != k {
+				continue
 			}
-		}
-		if idx < 0 && v != "-" {
-			for i, l := range lines {
-				if key, commented := keyOf(l); key == k && commented {
-					idx = i
-					break
+			switch {
+			case commented:
+				if commentedLine < 0 {
+					commentedLine = i
 				}
+			case first < 0:
+				first = i
+			default:
+				lines[i] = disabled
 			}
 		}
 		switch {
-		case idx >= 0:
-			lines[idx] = newLine
+		case first >= 0:
+			lines[first] = newLine
+		case v != "-" && commentedLine >= 0:
+			lines[commentedLine] = newLine
 		case v != "-":
 			lines = append(lines, newLine)
 		}

@@ -182,10 +182,25 @@ func WriteMarkdown(w io.Writer, entries []store.Entry, loc *time.Location) error
 			hasReports = true
 		}
 		wake := e.WakeAt.In(loc)
-		fmt.Fprintf(&b, "\n### %s %s\n\n%s\n", wake.Format("2006-01-02"), ru.Weekday(wake), e.Report)
+		fmt.Fprintf(&b, "\n### %s %s\n\n", wake.Format("2006-01-02"), ru.Weekday(wake))
+		// Отступ сохраняет текст как кодовый блок, включая HTML и ссылки.
+		report := strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(e.Report)
+		fmt.Fprintln(&b, "    "+strings.ReplaceAll(report, "\n", "\n    "))
 	}
 	_, err := io.WriteString(w, b.String())
 	return err
 }
 
-func mdCell(s string) string { return strings.ReplaceAll(s, "|", "\\|") }
+func mdCell(s string) string {
+	var b strings.Builder
+	for _, r := range strings.Join(strings.Fields(s), " ") {
+		// Сущности отображаются как текст и не образуют синтаксис Markdown.
+		switch {
+		case '!' <= r && r <= '/', ':' <= r && r <= '@', '[' <= r && r <= '`', '{' <= r && r <= '~':
+			fmt.Fprintf(&b, "&#%d;", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}

@@ -1,6 +1,7 @@
 // Экран PIN: установка, разблокировка, смена. Проверка — только на сервере.
-(function () {
+(window.lifelogReady || Promise.resolve(true)).then(function (ready) {
   "use strict";
+  if (!ready) return;
   var root = document.querySelector(".pin");
   var len = parseInt(root.dataset.length, 10) || 6;
   var mode = root.dataset.mode; // setup | unlock | change
@@ -9,7 +10,7 @@
   var dots = root.querySelectorAll(".dots span");
   var keys = root.querySelectorAll(".keypad button");
   var tg = window.Telegram && window.Telegram.WebApp;
-  if (tg && tg.initData) { tg.ready(); tg.expand(); } else { tg = null; }
+  if (!(tg && tg.initData)) tg = null;
 
   // Шаги ввода для каждого режима: имя значения и заголовок.
   var STEPS = {
@@ -56,8 +57,8 @@
       .then(function (r) { return r.json().then(function (j) { return { r: r, j: j }; }); })
       .then(function (res) {
         busy = false;
-        values = {};
         if (res.r.ok) {
+          values = {};
           if (mode === "change") {
             title.textContent = "PIN изменён"; say("");
             if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
@@ -67,9 +68,11 @@
           }
           return;
         }
+        var retryNew = mode === "change" && res.j.step === "new";
+        values = retryNew ? { old: values.old } : {};
         if (res.r.status === 429) { fail(res.j.error); disable(res.j.retry_after || 60); return; }
-        if (res.r.status === 401 && res.j.locked) { location.reload(); return; } // разблокировка истекла
-        fail(res.j.error || ("Ошибка " + res.r.status), res.j.step === "new" ? stepOf("pin") : 0);
+        if (res.j.locked) { location.reload(); return; }
+        fail(res.j.error || ("Ошибка " + res.r.status), retryNew ? stepOf("pin") : 0);
       })
       .catch(function (e) { busy = false; values = {}; fail("Нет связи: " + e.message); });
   }
@@ -105,4 +108,4 @@
     tg.BackButton.show();
     tg.BackButton.onClick(function () { location.href = "/data"; });
   }
-})();
+});

@@ -17,6 +17,7 @@ import (
 
 // dayView — день, подготовленный для шаблона формы.
 type dayView struct {
+	UserID     int64
 	ID         int64
 	DateLong   string
 	Values     map[string]string
@@ -34,6 +35,7 @@ var energyOpts = []int{1, 2, 3, 4, 5}
 func (s *Server) view(r *http.Request, d *store.Day) (*dayView, error) {
 	v := &dayView{
 		ID:       d.ID,
+		UserID:   s.days(r).UserID(),
 		DateLong: ru.DateLong(d.WakeAt.In(s.loc)),
 		Values:   map[string]string{},
 	}
@@ -115,21 +117,9 @@ func (s *Server) bed(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	d, err := s.days(r).Get(r.Context(), id)
-	if errors.Is(err, store.ErrNotFound) {
-		http.NotFound(w, r)
+	if err := s.days(r).Bed(r.Context(), id, s.opt.Now()); err != nil {
+		s.inputOrFail(w, err)
 		return
-	} else if err != nil {
-		s.fail(w, err)
-		return
-	}
-	if d.BedAt == nil { // повторное нажатие не перезаписывает время
-		now := s.opt.Now().UTC().Truncate(time.Second)
-		d.BedAt = &now
-		if err := s.days(r).Save(r.Context(), d); err != nil {
-			s.inputOrFail(w, err)
-			return
-		}
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -162,10 +152,10 @@ func (s *Server) dayPage(w http.ResponseWriter, r *http.Request) {
 	}
 	v.ShowBed = true
 	v.Stale = false
-	if p, err := s.days(r).Prev(ctx, d.WakeAt); err == nil && p != nil {
+	if p, err := s.days(r).Prev(ctx, d); err == nil && p != nil {
 		v.PrevID = p.ID
 	}
-	if n, err := s.days(r).Next(ctx, d.WakeAt); err == nil && n != nil {
+	if n, err := s.days(r).Next(ctx, d); err == nil && n != nil {
 		v.NextID = n.ID
 	}
 	s.render(w, http.StatusOK, "day.html", page{Title: v.DateLong, Active: "history", Data: dayPageData{v, energyOpts}})
@@ -225,7 +215,8 @@ func (s *Server) saveField(w http.ResponseWriter, r *http.Request) {
 		reply(http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	case err != nil:
-		reply(http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		s.logError(err)
+		reply(http.StatusInternalServerError, map[string]any{"error": internalError})
 		return
 	}
 	f, _ := store.FieldByName(name)
@@ -368,8 +359,7 @@ func (s *Server) dataPage(w http.ResponseWriter, r *http.Request) {
 }
 
 // rangeParams разбирает ?from=&to= (локальные даты, включительно).
-func (s *Server) rangeParams(r *http.Request) (from, to time.Time, label string, err error) {
-	q := r.URL.Query()
+func (s *Server) rangeParams(q url.Values) (from, to time.Time, label string, err error) {
 	label = "all"
 	if v := q.Get("from"); v != "" {
 		if from, _, err = store.DayBounds(v, s.loc); err != nil {
@@ -390,7 +380,7 @@ func (s *Server) rangeParams(r *http.Request) (from, to time.Time, label string,
 }
 
 func (s *Server) export(w http.ResponseWriter, r *http.Request, ext, ctype string, write func(http.ResponseWriter, []store.Entry) error) {
-	from, to, label, err := s.rangeParams(r)
+	from, to, label, err := s.rangeParams(r.URL.Query())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

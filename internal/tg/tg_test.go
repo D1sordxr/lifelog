@@ -75,7 +75,7 @@ func TestAllowlist(t *testing.T) {
 			t.Errorf("Allowed(%d,%q)=%v", c.id, c.name, got)
 		}
 	}
-	if !a.IsOwner(111, "") || a.IsOwner(222, "owner2") {
+	if !a.IsOwner(111) || a.IsOwner(222) {
 		t.Error("owner = first entry")
 	}
 	if ParseAllowlist(nil).Allowed(1, "x") {
@@ -145,3 +145,14 @@ func TestTokenNotInErrors(t *testing.T) {
 }
 
 func toJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
+
+func TestOwnerRequiresNumericFirstEntry(t *testing.T) {
+	byName := ParseAllowlist([]string{"@fixture", "222"})
+	if !byName.Allowed(111, "fixture") || byName.IsOwner(111) || byName.IsOwner(222) {
+		t.Fatal("username даёт доступ, а владельцем может быть только первая числовая запись")
+	}
+	byID := ParseAllowlist([]string{"111", "@fixture"})
+	if !byID.IsOwner(111) || byID.IsOwner(222) {
+		t.Fatal("владелец определяется по первому ID")
+	}
+}

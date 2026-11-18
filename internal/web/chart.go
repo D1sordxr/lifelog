@@ -57,7 +57,8 @@ func buildChart(entries []store.Entry, start time.Time, n int, loc *time.Locatio
 	y := func(min float64) float64 {
 		return mt + math.Max(0, math.Min(1440, min))/1440*ph
 	}
-	// offset — минуты от 18:00 накануне даты day.
+	// offset — минуты от 18:00 накануне даты day. На переходе DST
+	// шкала прошедшего времени может расходиться с местными часами.
 	offset := func(t time.Time, day time.Time) float64 {
 		a := time.Date(day.Year(), day.Month(), day.Day()-1, anchorHour, 0, 0, 0, loc)
 		return t.Sub(a).Minutes()

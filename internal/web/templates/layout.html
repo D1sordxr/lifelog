@@ -16,11 +16,12 @@
 <link rel="icon" type="image/png" href="{{static "icon-192.png"}}">
 <link rel="stylesheet" href="{{static "style.css"}}">
 {{if .TG}}<script src="https://telegram.org/js/telegram-web-app.js"></script>
-<script>(function(){var t=window.Telegram&&Telegram.WebApp;if(t&&t.initData&&t.colorScheme){document.documentElement.dataset.theme=t.colorScheme;}})();</script>{{end}}
+<script>(function(){var t=window.Telegram&&Telegram.WebApp;if(t&&t.initData){document.documentElement.classList.add("tg-checking");if(t.colorScheme)document.documentElement.dataset.theme=t.colorScheme;}})();</script>{{end}}
 <title>{{.Title}} · Журнал</title>
 </head>
 <body>
-<div class="wrap">
+{{if and .TG (not .Login)}}<p id="tg-status" class="muted" role="status">Проверяю вход через Telegram…</p>{{end}}
+<div class="wrap"{{if not .Login}} id="tg-content"{{end}}>
 {{if not .Bare}}<nav>
   <a href="/"{{if eq .Active "today"}} class="on" aria-current="page"{{end}}>Сегодня</a>
   <a href="/history"{{if eq .Active "history"}} class="on" aria-current="page"{{end}}>История</a>
@@ -32,6 +33,7 @@
 </main>
 </div>
 {{if and .TG (not .Bare)}}<form method="post" action="/pin/lock" class="lockbar"><button class="link">Заблокировать</button></form>{{end}}
-<script src="{{static .Script}}" defer></script>
+{{if .TG}}<script src="{{static "auth.js"}}" defer></script>{{end}}
+{{if .Script}}<script src="{{static .Script}}" defer></script>{{end}}
 </body>
 </html>{{end}}

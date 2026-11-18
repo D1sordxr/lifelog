@@ -3,13 +3,14 @@ package web
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -33,10 +34,22 @@ const (
 	sessionCookie  = "lifelog_session"
 	sessionTTL     = 30 * 24 * time.Hour
 	initDataMaxAge = 5 * time.Minute
-	downloadTTL    = 5 * time.Minute
+	downloadTTL    = 2 * time.Minute
+	initDataLimit  = 8 << 10
 )
 
 type userKey struct{}
+type sessionContextKey struct{}
+
+type requestSession struct {
+	token      string
+	pinVersion int64
+}
+
+func sessionFrom(r *http.Request) requestSession {
+	v, _ := r.Context().Value(sessionContextKey{}).(requestSession)
+	return v
+}
 
 func (s *Server) tgMode() bool { return s.opt.BotToken != "" }
 
@@ -69,34 +82,46 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (*http.Req
 	if !s.tgMode() || isPublic(r) {
 		return r, true
 	}
-	now := s.opt.Now()
-	var uid int64
-	if c, err := r.Cookie(sessionCookie); err == nil {
-		uid, _ = s.verifyToken("session", c.Value, now)
-	}
-	// Ссылка на скачивание экспорта для Telegram.WebApp.downloadFile: клиент Telegram
-	// качает файл сам, без cookie, поэтому в URL — короткоживущий подписанный токен.
-	viaDownload := false
-	if uid == 0 && strings.HasPrefix(r.URL.Path, "/export.") {
-		uid, _ = s.verifyToken("download", r.URL.Query().Get("dl"), now)
-		viaDownload = uid != 0 // токен выдаётся только разблокированной сессии
-	}
-	if uid != 0 {
-		u, err := s.st.UserByID(r.Context(), uid)
-		if err == nil && s.opt.Allow.Allowed(u.TGID, u.Username) {
-			r = r.WithContext(context.WithValue(r.Context(), userKey{}, u))
-			if viaDownload {
-				return r, true
+	if tok := r.URL.Query().Get("dl"); tok != "" && isExport(r.URL.Path) {
+		binding, err := s.downloadBinding(r.URL.Path, r.URL.Query())
+		if err == nil {
+			if uid, err := s.verifyToken("download", tok, s.opt.Now(), binding); err == nil {
+				if u := s.allowedUser(r.Context(), uid); u != nil {
+					return r.WithContext(context.WithValue(r.Context(), userKey{}, u)), true
+				}
 			}
-			return s.pinGate(w, r, u)
 		}
+	} else if u, token := s.sessionUser(r); u != nil {
+		ctx := context.WithValue(r.Context(), userKey{}, u)
+		ctx = context.WithValue(ctx, sessionContextKey{}, requestSession{token: token})
+		return s.pinGate(w, r.WithContext(ctx), u)
 	}
 	if r.Method == http.MethodGet && !strings.HasPrefix(r.URL.Path, "/export.") {
-		s.render(w, http.StatusOK, "auth.html", page{Title: "Вход", Bare: true, Script: "auth.js"})
+		s.render(w, http.StatusOK, "auth.html", page{Title: "Вход", Bare: true, Login: true})
 	} else {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "нужен вход через Telegram"})
 	}
 	return r, false
+}
+
+func (s *Server) allowedUser(ctx context.Context, uid int64) *store.User {
+	u, err := s.st.UserByID(ctx, uid)
+	if err != nil || !s.opt.Allow.Allowed(u.TGID, u.Username) {
+		return nil
+	}
+	return u
+}
+
+func (s *Server) sessionUser(r *http.Request) (*store.User, string) {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil {
+		return nil, ""
+	}
+	uid, err := s.verifyToken("session", c.Value, s.opt.Now(), "")
+	if err != nil {
+		return nil, ""
+	}
+	return s.allowedUser(r.Context(), uid), c.Value
 }
 
 // authTelegram — POST /auth/telegram, поле init_data = Telegram.WebApp.initData.
@@ -105,7 +130,10 @@ func (s *Server) authTelegram(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	d, err := tg.ValidateInitData(r.PostFormValue("init_data"), s.opt.BotToken, initDataMaxAge, s.opt.Now())
+	if !readSmallForm(w, r, initDataLimit) {
+		return
+	}
+	d, err := tg.ValidateInitData(r.PostForm.Get("init_data"), s.opt.BotToken, initDataMaxAge, s.opt.Now())
 	if err != nil {
 		log.Printf("auth: %v", err)
 		msg := "Ссылка входа недействительна. Закрой и открой журнал заново из Telegram."
@@ -132,14 +160,18 @@ func (s *Server) authTelegram(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": tg.NotAllowedText})
 		return
 	}
-	u, err := s.st.TelegramUser(r.Context(), tu.ID, tu.Username, s.opt.Allow.IsOwner(tu.ID, tu.Username))
+	if u, _ := s.sessionUser(r); u != nil && u.TGID == tu.ID {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "changed": false})
+		return
+	}
+	u, err := s.st.TelegramUser(r.Context(), tu.ID, tu.Username, s.opt.Allow.IsOwner(tu.ID))
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:        sessionCookie,
-		Value:       s.signToken("session", u.ID, s.opt.Now().Add(sessionTTL)),
+		Value:       s.signToken("session", u.ID, s.opt.Now().Add(sessionTTL), ""),
 		Path:        "/",
 		MaxAge:      int(sessionTTL / time.Second),
 		HttpOnly:    true,
@@ -147,45 +179,83 @@ func (s *Server) authTelegram(w http.ResponseWriter, r *http.Request) {
 		SameSite:    http.SameSiteNoneMode, // Telegram Web/Desktop открывают приложение во фрейме
 		Partitioned: true,
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	clearUnlock(w)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "changed": true})
 }
 
-// downloadToken — POST /auth/download: токен для ссылки на экспорт (5 минут).
+// downloadToken — POST /auth/download: ссылка на один формат и диапазон.
 func (s *Server) downloadToken(w http.ResponseWriter, r *http.Request) {
 	u, ok := r.Context().Value(userKey{}).(*store.User)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "нужен вход"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"token": s.signToken("download", u.ID, s.opt.Now().Add(downloadTTL))})
-}
-
-// signToken: "uid.exp.base64(HMAC(key, kind|uid.exp))". Ключ выводится из токена бота.
-func (s *Server) signToken(kind string, uid int64, exp time.Time) string {
-	payload := strconv.FormatInt(uid, 10) + "." + strconv.FormatInt(exp.Unix(), 10)
-	return payload + "." + base64.RawURLEncoding.EncodeToString(s.mac(kind, payload))
-}
-
-func (s *Server) verifyToken(kind, tok string, now time.Time) (int64, error) {
-	parts := strings.Split(tok, ".")
-	if len(parts) != 3 {
-		return 0, fmt.Errorf("bad token")
+	if !readSmallForm(w, r, pinFormLimit) {
+		return
 	}
-	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil || !hmac.Equal(sig, s.mac(kind, parts[0]+"."+parts[1])) {
-		return 0, fmt.Errorf("bad signature")
+	binding, err := s.downloadBinding("/export."+r.PostForm.Get("format"), r.PostForm)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	token := s.signToken("download", u.ID, s.opt.Now().Add(downloadTTL), binding)
+	writeJSON(w, http.StatusOK, map[string]any{"token": token})
+}
+
+func isExport(path string) bool {
+	switch path {
+	case "/export.csv", "/export.json", "/export.md":
+		return true
+	}
+	return false
+}
+
+func (s *Server) downloadBinding(path string, values url.Values) (string, error) {
+	if !isExport(path) {
+		return "", errors.New("неизвестный формат экспорта")
+	}
+	from, to, _, err := s.rangeParams(values)
+	if err != nil {
+		return "", err
+	}
+	return path + "|" + fmtTimeBound(from) + "|" + fmtTimeBound(to), nil
+}
+
+func fmtTimeBound(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// Случайная часть отличает даже сессии одного пользователя, выданные в одну секунду.
+// Тип токена и привязка подписываются вместе с его полями.
+func (s *Server) signToken(kind string, uid int64, exp time.Time, binding string) string {
+	payload := strconv.FormatInt(uid, 10) + "." + strconv.FormatInt(exp.Unix(), 10) + "." + rand.Text()
+	return payload + "." + base64.RawURLEncoding.EncodeToString(s.mac(kind, payload, binding))
+}
+
+func (s *Server) verifyToken(kind, tok string, now time.Time, binding string) (int64, error) {
+	parts := strings.Split(tok, ".")
+	if len(parts) != 4 || parts[2] == "" {
+		return 0, errors.New("некорректный токен")
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(parts[3])
+	payload := strings.Join(parts[:3], ".")
+	if err != nil || !hmac.Equal(sig, s.mac(kind, payload, binding)) {
+		return 0, errors.New("неверная подпись токена")
 	}
 	uid, err1 := strconv.ParseInt(parts[0], 10, 64)
 	exp, err2 := strconv.ParseInt(parts[1], 10, 64)
-	if err1 != nil || err2 != nil || now.Unix() > exp {
-		return 0, fmt.Errorf("expired")
+	if err1 != nil || err2 != nil || now.Unix() >= exp || uid <= 0 {
+		return 0, errors.New("токен недействителен")
 	}
 	return uid, nil
 }
 
-func (s *Server) mac(kind, payload string) []byte {
+func (s *Server) mac(kind, payload, binding string) []byte {
 	m := hmac.New(sha256.New, s.sessKey)
-	m.Write([]byte(kind + "|" + payload))
+	m.Write([]byte(kind + "|" + payload + "|" + binding))
 	return m.Sum(nil)
 }
 

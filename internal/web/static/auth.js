@@ -1,45 +1,60 @@
-// Вход: отправляем Telegram.WebApp.initData целиком, сервер проверяет подпись.
+// Проверяем свежий запуск Telegram и на страницах с уже действующей сессией.
 (function () {
   "use strict";
-  var status = document.getElementById("auth-status");
+  var loginStatus = document.getElementById("auth-status");
+  var status = loginStatus || document.getElementById("tg-status");
   var hint = document.getElementById("auth-hint");
   var tg = window.Telegram && window.Telegram.WebApp;
-  var NOT_ALLOWED = "You are not allowed to use this app";
 
-  if (!tg || !tg.initData) {
-    status.textContent = NOT_ALLOWED;
-    hint.hidden = false;
-    return;
-  }
-  tg.ready();
-  tg.expand();
-
-  // Если после входа снова попали сюда — cookie не сохранилась.
-  var tried = false;
-  try { tried = !!sessionStorage.getItem("lifelog-auth-tried"); sessionStorage.removeItem("lifelog-auth-tried"); } catch (e) {}
-  if (tried) {
-    status.textContent = "Не удалось сохранить сессию: этот клиент Telegram блокирует cookies. Попробуй приложение Telegram на телефоне или компьютере.";
-    return;
+  function reveal() {
+    document.documentElement.classList.remove("tg-checking");
+    return true;
   }
 
-  fetch("/auth/telegram", {
-    method: "POST",
-    body: new URLSearchParams({ init_data: tg.initData }),
-    credentials: "same-origin"
-  }).then(function (r) {
-    if (r.ok) {
-      try { sessionStorage.setItem("lifelog-auth-tried", "1"); } catch (e) {}
-      location.reload();
-    } else if (r.status === 403) {
-      status.textContent = NOT_ALLOWED;
-    } else {
-      return r.json().then(function (j) {
-        status.textContent = j.error || ("Вход не удался (HTTP " + r.status + "). Закрой и открой приложение заново.");
-      }, function () {
-        status.textContent = "Вход не удался (HTTP " + r.status + "). Закрой и открой приложение заново.";
-      });
+  function login() {
+    if (!tg || !tg.initData) {
+      if (!loginStatus) return reveal();
+      status.textContent = "You are not allowed to use this app";
+      hint.hidden = false;
+      return false;
     }
-  }).catch(function (e) {
-    status.textContent = "Нет связи с сервером: " + e.message;
+    tg.ready();
+    tg.expand();
+    var hash = new URLSearchParams(tg.initData).get("hash");
+    var key = hash ? "lifelog-init-" + hash.toLowerCase() : "";
+    try {
+      if (key && sessionStorage.getItem(key)) {
+        if (!loginStatus) return reveal();
+        status.textContent = "Сессия недоступна. Закрой и открой журнал заново из Telegram.";
+        return false;
+      }
+    } catch (e) {}
+
+    return fetch("/auth/telegram", {
+      method: "POST",
+      body: new URLSearchParams({ init_data: tg.initData }),
+      credentials: "same-origin"
+    }).then(function (r) {
+      return r.json().then(function (result) {
+        if (!r.ok) {
+          status.textContent = result.error || "Вход не удался. Открой журнал заново из Telegram.";
+          return false;
+        }
+        try { if (key) sessionStorage.setItem(key, "1"); } catch (e) {}
+        if (result.changed) {
+          location.reload();
+          return false;
+        }
+        return reveal();
+      });
+    }).catch(function () {
+      status.textContent = "Не удалось проверить вход. Открой журнал заново из Telegram.";
+      return false;
+    });
+  }
+
+  window.lifelogReady = Promise.resolve().then(login);
+  window.addEventListener("pageshow", function (event) {
+    if (event.persisted) location.reload();
   });
 })();

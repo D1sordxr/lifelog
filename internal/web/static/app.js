@@ -1,14 +1,12 @@
 // Автосохранение полей дня. Без фреймворков.
-(function () {
+(window.lifelogReady || Promise.resolve(true)).then(function (ready) {
   "use strict";
+  if (!ready) return;
 
   // --- Telegram Mini App ---
-  try { sessionStorage.removeItem("lifelog-auth-tried"); } catch (e) {}
   var tg = window.Telegram && window.Telegram.WebApp;
   if (!(tg && tg.initData)) tg = null;
   if (tg) {
-    tg.ready();
-    tg.expand();
     tg.onEvent("themeChanged", function () { document.documentElement.dataset.theme = tg.colorScheme; });
     if (location.pathname !== "/" && tg.BackButton) {
       tg.BackButton.show();
@@ -29,82 +27,106 @@
   document.querySelectorAll("form.day").forEach(function (form) {
     var url = "/days/" + form.dataset.id + "/field";
     var timers = {};
-    var pending = {}; // name -> value, ещё не отправлено
+    var pending = {}; // поле → новое значение, ожидающее отправки
+    var sending = {};
+    var storagePrefix = "lifelog-draft-" + form.dataset.userId + "-" + form.dataset.id + "-";
+    var revision = 0;
 
     function statusFor(el) {
       var f = el.closest(".field");
       return f ? f.querySelector(".st") : null;
     }
 
-    function save(el, value) {
-      var name = el.name;
-      if (value === undefined) value = el.value;
-      delete pending[name];
+    function stage(el, value) {
+      var entry = { el: el, value: value, draft: JSON.stringify([value, Date.now(), ++revision]) };
+      pending[el.name] = entry;
+      try { sessionStorage.setItem(storagePrefix + el.name, entry.draft); } catch (e) {}
+    }
+
+    function save(name, keepalive) {
       clearTimeout(timers[name]);
+      delete timers[name];
+      if (sending[name] || !pending[name]) return;
+      var entry = pending[name];
+      delete pending[name];
+      sending[name] = true;
+      var el = entry.el;
       var st = statusFor(el);
       flash(st, "сохраняю…");
-      var body = new URLSearchParams({ name: name, value: value });
-      return fetch(url, { method: "POST", body: body, credentials: "same-origin" })
+      var body = new URLSearchParams({ name: name, value: entry.value });
+      fetch(url, { method: "POST", body: body, credentials: "same-origin", keepalive: keepalive })
         .then(function (r) {
           return r.json().then(function (j) {
             if (!r.ok) {
-              if (j.locked) { // истекла разблокировка: сохраним значение и покажем PIN
-                stash(name, value);
-                location.reload();
-              }
+              if (j.locked && !document.hidden) location.reload();
               throw new Error(j.error || ("HTTP " + r.status));
             }
             return j;
           });
         })
         .then(function (j) {
-          if (el.type !== "hidden" && document.activeElement !== el && el.value !== j.value) el.value = j.value;
-          if (el.type === "hidden" || value === "now") el.value = j.value;
+          var key = storagePrefix + name;
+          try { if (sessionStorage.getItem(key) === entry.draft) sessionStorage.removeItem(key); } catch (e) {}
+          if (pending[name]) return;
+          if (el.type === "hidden" || entry.value === "now" || document.activeElement !== el) el.value = j.value;
           var s = form.querySelector("[data-sleep]");
           if (s && j.sleep) s.textContent = j.sleep;
           flash(st, "сохранено", "ok");
         })
-        .catch(function (e) { flash(st, "ошибка: " + e.message, "err"); });
+        .catch(function (e) { flash(st, "ошибка: " + e.message, "err"); })
+        .finally(function () {
+          delete sending[name];
+          if (pending[name] && !timers[name]) save(name, document.hidden);
+        });
     }
 
-    // Значения, не сохранённые из-за блокировки, — досохраняем после ввода PIN.
-    function stashKey(name) { return "lifelog-pending-" + form.dataset.id + "-" + name; }
-    function stash(name, value) { try { sessionStorage.setItem(stashKey(name), value); } catch (e) {} }
+    function saveValue(el, value) {
+      stage(el, value);
+      save(el.name, false);
+    }
+
+    function showEnergy(value) {
+      form.querySelectorAll("[data-energy]").forEach(function (button) {
+        button.setAttribute("aria-pressed", String(button.dataset.energy === value));
+      });
+    }
+
+    // Черновик живёт до успешного ответа, в том числе после ухода или блокировки.
     Array.prototype.forEach.call(form.elements, function (el) {
       if (!el.name) return;
-      var v = null;
-      try { v = sessionStorage.getItem(stashKey(el.name)); sessionStorage.removeItem(stashKey(el.name)); } catch (e) {}
-      if (v !== null) { el.value = v; save(el, v); }
+      try {
+        var draft = sessionStorage.getItem(storagePrefix + el.name);
+        if (draft === null) return;
+        var value = JSON.parse(draft)[0];
+        if (value !== "now") el.value = value;
+        if (el.name === "energy") showEnergy(value);
+        pending[el.name] = { el: el, value: value, draft: draft };
+        save(el.name, false);
+      } catch (e) {}
     });
 
     form.addEventListener("change", function (e) {
-      if (e.target.name && e.target.type !== "hidden") save(e.target);
+      if (e.target.name && e.target.type !== "hidden") saveValue(e.target, e.target.value);
     });
 
-    // Текст сохраняем по ходу набора (iOS может выгрузить страницу без blur).
+    // Сохраняем черновик сразу, а запрос откладываем до паузы в наборе.
     form.querySelectorAll("textarea, input[type=text], input[type=number]").forEach(function (el) {
       el.addEventListener("input", function () {
-        pending[el.name] = el.value;
+        stage(el, el.value);
         clearTimeout(timers[el.name]);
-        timers[el.name] = setTimeout(function () { save(el); }, 1200);
+        timers[el.name] = setTimeout(function () { save(el.name, false); }, 1200);
       });
     });
 
     function flush() {
-      Object.keys(pending).forEach(function (name) {
-        var body = new URLSearchParams({ name: name, value: pending[name] });
-        if (!(navigator.sendBeacon && navigator.sendBeacon(url, body))) {
-          fetch(url, { method: "POST", body: body, keepalive: true });
-        }
-        delete pending[name];
-      });
+      Object.keys(pending).forEach(function (name) { save(name, true); });
     }
     window.addEventListener("pagehide", flush);
     document.addEventListener("visibilitychange", function () { if (document.hidden) flush(); });
 
     // Кнопки «сейчас»: время ставит сервер.
     form.querySelectorAll("[data-now]").forEach(function (b) {
-      b.addEventListener("click", function () { save(form.elements[b.dataset.now], "now"); });
+      b.addEventListener("click", function () { saveValue(form.elements[b.dataset.now], "now"); });
     });
 
     // Энергия: повторное нажатие снимает выбор.
@@ -153,10 +175,13 @@
       if (!btn || !btn.formAction) return;
       e.preventDefault();
       var path = new URL(btn.formAction).pathname; // /export.md
-      fetch("/auth/download", { method: "POST", credentials: "same-origin" })
+      var q = new URLSearchParams({ from: exportForm.elements.from.value, to: exportForm.elements.to.value });
+      var body = new URLSearchParams(q);
+      body.set("format", path.slice("/export.".length));
+      fetch("/auth/download", { method: "POST", credentials: "same-origin", body: body })
         .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
         .then(function (j) {
-          var q = new URLSearchParams({ from: exportForm.elements.from.value, to: exportForm.elements.to.value, dl: j.token });
+          q.set("dl", j.token);
           tg.downloadFile({ url: location.origin + path + "?" + q, file_name: "lifelog" + path.replace("/export", "") });
         })
         .catch(function (err) { tg.showAlert("Не удалось скачать: " + err.message); });
@@ -186,4 +211,4 @@
       }
     });
   }
-})();
+});

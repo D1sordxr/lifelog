@@ -46,6 +46,9 @@ func ParseCSV(r io.Reader, loc *time.Location) ([]store.ImportRow, []string, err
 		if !known[h] {
 			return nil, nil, fmt.Errorf("неизвестная колонка %q (допустимы: %s)", h, strings.Join(Columns, ", "))
 		}
+		if _, exists := col[h]; exists {
+			return nil, nil, fmt.Errorf("повторяющаяся колонка %q", h)
+		}
 		col[h] = i
 	}
 	if _, ok := col["wake_at"]; !ok {
@@ -59,18 +62,25 @@ func ParseCSV(r io.Reader, loc *time.Location) ([]store.ImportRow, []string, err
 		if err == io.EOF {
 			break
 		}
-		line, _ := cr.FieldPos(0)
 		if err != nil {
-			errs = append(errs, fmt.Sprintf("строка %d: %v", line, err))
+			errs = append(errs, err.Error())
+			continue
+		}
+		line, _ := cr.FieldPos(0)
+		if len(rec) > len(header) {
+			errs = append(errs, fmt.Sprintf("строка %d: полей больше, чем в заголовке", line))
 			continue
 		}
 		get := func(name string) string {
 			if i, ok := col[name]; ok && i < len(rec) {
+				if name == "report" {
+					return rec[i]
+				}
 				return strings.TrimSpace(rec[i])
 			}
 			return ""
 		}
-		if strings.TrimSpace(strings.Join(rec, "")) == "" {
+		if get("report") == "" && strings.TrimSpace(strings.Join(rec, "")) == "" {
 			continue
 		}
 		row, err := parseRow(get, loc)
