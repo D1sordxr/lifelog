@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestUsersIsolation(t *testing.T) {
@@ -99,5 +100,26 @@ func TestConcurrentOpenMigrates(t *testing.T) {
 		if err := <-errs; err != nil {
 			t.Fatalf("concurrent open: %v", err)
 		}
+	}
+}
+
+func TestUseInitData(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	now := lt("2026-11-18 10:00")
+	s.SetClock(func() time.Time { return now })
+	if ok, err := s.UseInitData(ctx, "abc", now.Add(15*time.Minute)); !ok || err != nil {
+		t.Fatalf("first: %v %v", ok, err)
+	}
+	if ok, _ := s.UseInitData(ctx, "abc", now.Add(15*time.Minute)); ok {
+		t.Fatal("replay accepted")
+	}
+	// просроченные записи чистятся
+	now = now.Add(time.Hour)
+	s.UseInitData(ctx, "other", now.Add(15*time.Minute))
+	var n int
+	s.db.QueryRow(`SELECT COUNT(*) FROM used_init_data`).Scan(&n)
+	if n != 1 {
+		t.Fatalf("cleanup: %d rows", n)
 	}
 }

@@ -21,6 +21,13 @@ type WebAppUser struct {
 	FirstName string `json:"first_name"`
 }
 
+// InitData — проверенный initData.
+type InitData struct {
+	User     WebAppUser
+	AuthDate time.Time
+	Hash     string // уникален для каждого открытия мини-приложения — по нему ловим повторы
+}
+
 var (
 	ErrBadSignature = errors.New("initData: неверная подпись")
 	ErrExpired      = errors.New("initData: устарели (auth_date)")
@@ -31,7 +38,7 @@ var (
 // HMAC-SHA256 подпись (ключ — HMAC("WebAppData", токен бота)) и свежесть auth_date.
 // Данным из initDataUnsafe на клиенте доверять нельзя — только этой проверке.
 // https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
-func ValidateInitData(initData, botToken string, maxAge time.Duration, now time.Time) (*WebAppUser, error) {
+func ValidateInitData(initData, botToken string, maxAge time.Duration, now time.Time) (*InitData, error) {
 	if botToken == "" {
 		return nil, errors.New("initData: не задан токен бота")
 	}
@@ -67,7 +74,8 @@ func ValidateInitData(initData, botToken string, maxAge time.Duration, now time.
 	if err != nil {
 		return nil, ErrMalformed
 	}
-	age := now.Sub(time.Unix(authDate, 0))
+	at := time.Unix(authDate, 0)
+	age := now.Sub(at)
 	if age > maxAge || age < -5*time.Minute {
 		return nil, ErrExpired
 	}
@@ -76,7 +84,7 @@ func ValidateInitData(initData, botToken string, maxAge time.Duration, now time.
 	if err := json.Unmarshal([]byte(vals.Get("user")), &u); err != nil || u.ID == 0 {
 		return nil, ErrMalformed
 	}
-	return &u, nil
+	return &InitData{User: u, AuthDate: at, Hash: strings.ToLower(hash)}, nil
 }
 
 func sign(botToken, dataCheckString string) []byte {

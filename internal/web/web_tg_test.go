@@ -26,6 +26,7 @@ type tgEnv struct {
 	now   time.Time
 	allow tg.Allowlist
 	srv   *httptest.Server
+	opens int // счётчик «открытий» мини-приложения: у каждого свой query_id и hash
 }
 
 func newTGEnv(t *testing.T) *tgEnv {
@@ -36,7 +37,8 @@ func newTGEnv(t *testing.T) *tgEnv {
 	t.Cleanup(func() { st.Close() })
 	e := &tgEnv{t: t, st: st, now: time.Date(2026, 11, 18, 7, 30, 0, 0, tz)}
 	st.SetClock(func() time.Time { return e.now })
-	e.serve(tg.ParseAllowlist([]string{"111", "@tester"}))
+	e.allow = tg.ParseAllowlist([]string{"111", "@tester"})
+	e.serve(e.allow)
 	return e
 }
 
@@ -78,7 +80,9 @@ func (e *tgEnv) req(method, path, cookie string, form url.Values, hdr map[string
 }
 
 func (e *tgEnv) initData(id int64, username string) string {
+	e.opens++
 	return tg.SignInitData(botToken, map[string]string{
+		"query_id":  "Q" + strconv.Itoa(e.opens),
 		"auth_date": strconv.FormatInt(e.now.Unix(), 10),
 		"user":      `{"id":` + strconv.FormatInt(id, 10) + `,"first_name":"T","username":"` + username + `"}`,
 	})
@@ -357,5 +361,43 @@ func TestPINChange(t *testing.T) {
 	}
 	if resp, _ := e.req("POST", "/pin", sess, url.Values{"pin": {"111111"}}, nil); resp.StatusCode != 200 {
 		t.Fatalf("new PIN: %d", resp.StatusCode)
+	}
+}
+
+func TestInitDataReplay(t *testing.T) {
+	e := newTGEnv(t)
+	post := func(initData string) (int, string) {
+		resp, body := e.req("POST", "/auth/telegram", "", url.Values{"init_data": {initData}}, nil)
+		return resp.StatusCode, body
+	}
+
+	link := e.initData(111, "")
+	if code, _ := post(link); code != 200 {
+		t.Fatalf("first use: %d", code)
+	}
+	// Та же строка (скопированная ссылка #tgWebAppData=…) — отказ.
+	if code, body := post(link); code != 401 || !strings.Contains(body, "уже использована") {
+		t.Fatalf("replay: %d %s", code, body)
+	}
+	// И после «перезапуска» службы — отметка хранится в базе.
+	e.serve(e.allow)
+	if code, _ := post(link); code != 401 {
+		t.Fatalf("replay after restart: %d", code)
+	}
+	// Новое открытие мини-приложения — новый initData, вход проходит.
+	if code, _ := post(e.initData(111, "")); code != 200 {
+		t.Fatalf("fresh open: %d", code)
+	}
+	// Старше 5 минут — отказ, даже ни разу не использованный.
+	old := e.initData(111, "")
+	e.now = e.now.Add(6 * time.Minute)
+	if code, body := post(old); code != 401 || !strings.Contains(body, "устарела") {
+		t.Fatalf("expired: %d %s", code, body)
+	}
+	// Отказ постороннему тоже «сжигает» строку.
+	stranger := e.initData(999, "x")
+	post(stranger)
+	if code, _ := post(stranger); code != 401 {
+		t.Fatalf("stranger replay: %d", code)
 	}
 }

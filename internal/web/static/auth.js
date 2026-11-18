@@ -33,7 +33,11 @@
     } else if (r.status === 403) {
       status.textContent = NOT_ALLOWED;
     } else {
-      status.textContent = "Вход не удался (HTTP " + r.status + "). Закрой и открой приложение заново.";
+      return r.json().then(function (j) {
+        status.textContent = j.error || ("Вход не удался (HTTP " + r.status + "). Закрой и открой приложение заново.");
+      }, function () {
+        status.textContent = "Вход не удался (HTTP " + r.status + "). Закрой и открой приложение заново.";
+      });
     }
   }).catch(function (e) {
     status.textContent = "Нет связи с сервером: " + e.message;

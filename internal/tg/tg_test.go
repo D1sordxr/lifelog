@@ -28,9 +28,9 @@ func TestValidateInitData(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	good := initData(42, "Tester", now.Add(-time.Minute))
 
-	u, err := ValidateInitData(good, token, time.Hour, now)
-	if err != nil || u.ID != 42 || u.Username != "Tester" {
-		t.Fatalf("valid: %+v %v", u, err)
+	d, err := ValidateInitData(good, token, time.Hour, now)
+	if err != nil || d.User.ID != 42 || d.User.Username != "Tester" || len(d.Hash) != 64 || !d.AuthDate.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("valid: %+v %v", d, err)
 	}
 
 	// Подмена id в подписанной строке.

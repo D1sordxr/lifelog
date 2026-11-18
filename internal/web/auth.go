@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -20,8 +21,9 @@ import (
 // Вход через Telegram Mini App:
 //  1. страница без сессии отдаёт auth.html; его JS отправляет Telegram.WebApp.initData
 //     целиком на POST /auth/telegram;
-//  2. сервер проверяет подпись initData токеном бота и свежесть auth_date,
-//     сверяет пользователя с allowlist и ставит подписанную cookie сессии;
+//  2. сервер проверяет подпись initData токеном бота и свежесть auth_date (5 минут),
+//     принимает каждый initData только один раз (ссылку #tgWebAppData=… нельзя
+//     переиспользовать), сверяет пользователя с allowlist и ставит cookie сессии;
 //  3. каждый запрос: cookie → пользователь → снова проверка по allowlist
 //     (убрали из ALLOWED_USERS — доступ пропал после перезапуска).
 // Данным из initDataUnsafe и любым id из запроса сервер не доверяет.
@@ -30,7 +32,7 @@ import (
 const (
 	sessionCookie  = "lifelog_session"
 	sessionTTL     = 30 * 24 * time.Hour
-	initDataMaxAge = time.Hour
+	initDataMaxAge = 5 * time.Minute
 	downloadTTL    = 5 * time.Minute
 )
 
@@ -103,12 +105,28 @@ func (s *Server) authTelegram(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	tu, err := tg.ValidateInitData(r.PostFormValue("init_data"), s.opt.BotToken, initDataMaxAge, s.opt.Now())
+	d, err := tg.ValidateInitData(r.PostFormValue("init_data"), s.opt.BotToken, initDataMaxAge, s.opt.Now())
 	if err != nil {
 		log.Printf("auth: %v", err)
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": err.Error()})
+		msg := "Ссылка входа недействительна. Закрой и открой журнал заново из Telegram."
+		if errors.Is(err, tg.ErrExpired) {
+			msg = "Ссылка входа устарела. Закрой и открой журнал заново из Telegram."
+		}
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": msg})
 		return
 	}
+	// Одноразовость: тот же initData (например, скопированная ссылка) второй раз не пускает.
+	fresh, err := s.st.UseInitData(r.Context(), d.Hash, d.AuthDate.Add(initDataMaxAge+10*time.Minute))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if !fresh {
+		log.Printf("auth: initData replay for user %d", d.User.ID)
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "Эта ссылка входа уже использована. Открой журнал заново из Telegram."})
+		return
+	}
+	tu := &d.User
 	if !s.opt.Allow.Allowed(tu.ID, tu.Username) {
 		log.Printf("auth: user %d not allowed", tu.ID)
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": tg.NotAllowedText})
