@@ -343,6 +343,7 @@ func snippet(s string, n int) string {
 // --- Данные: экспорт/импорт ---
 
 type dataPageData struct {
+	PIN      bool // показать «Сменить PIN»
 	From, To string
 	Count    int
 	Result   *store.ImportResult
@@ -358,6 +359,7 @@ func (s *Server) dataPage(w http.ResponseWriter, r *http.Request) {
 	}
 	now := s.opt.Now().In(s.loc)
 	d := dataPageData{
+		PIN:   s.tgMode(),
 		From:  now.AddDate(0, 0, -29).Format("2006-01-02"),
 		To:    now.Format("2006-01-02"),
 		Count: n,

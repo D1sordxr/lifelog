@@ -31,6 +31,18 @@ func programFiles() string { return env("ProgramFiles", `C:\Program Files`) }
 func defaultDataDir() string { return filepath.Join(programData(), "lifelog") }
 func installedExe() string   { return filepath.Join(programFiles(), "lifelog", "lifelog.exe") }
 
+// defaultEnvFile — env-файл службы. В обычном запуске (не служба) не используется.
+func defaultEnvFile() string {
+	if isSvc, _ := svc.IsWindowsService(); isSvc {
+		return filepath.Join(defaultDataDir(), "lifelog.env")
+	}
+	return ""
+}
+
+// Пути службы для ручных команд backup и reset-pin.
+func adminEnvFile() string { return filepath.Join(defaultDataDir(), "lifelog.env") }
+func adminDBPath() string  { return filepath.Join(defaultDataDir(), "lifelog.db") }
+
 func defaultDBPath() string {
 	if isSvc, _ := svc.IsWindowsService(); isSvc {
 		return filepath.Join(defaultDataDir(), "lifelog.db")
@@ -115,8 +127,8 @@ func (s *service) Execute(_ []string, req <-chan svc.ChangeRequest, status chan<
 // с автозапуском и перезапуском при сбоях, выдаёт права на папку данных и
 // запускает службу. Запускать из терминала администратора.
 //
-// Переменные из envKeys, заданные в текущем окружении, сохраняются в
-// настройки службы поверх прежних (остальные не меняются; "-" — удалить).
+// Переменные из envKeys, заданные в текущем окружении, сохраняются в env-файл
+// службы поверх прежних (остальные не меняются; "-" — закомментировать).
 func install() error {
 	m, err := mgr.Connect()
 	if err != nil {
@@ -178,28 +190,33 @@ func install() error {
 		return fmt.Errorf("recovery: %w", err)
 	}
 
-	// 4. Окружение службы.
-	if err := saveServiceEnv(); err != nil {
-		return err
-	}
-
-	// 5. Папка данных: только администраторы, SYSTEM и сама служба.
+	// 4. Папка данных: только администраторы, SYSTEM и сама служба
+	//    (там же env-файл с токеном бота).
 	dataDir := defaultDataDir()
-	if p := os.Getenv("DB_PATH"); p != "" {
-		dataDir = filepath.Dir(p)
-	} else if p := serviceEnv()["DB_PATH"]; p != "" {
-		dataDir = filepath.Dir(p)
-	}
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return err
 	}
-	// SID вместо имён групп — имена локализованы («Администраторы»).
-	out, err := exec.Command("icacls", dataDir, "/inheritance:r",
-		"/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", serviceAccount+":(OI)(CI)M").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("icacls %s: %v: %s", dataDir, err, out)
+	dirs := []string{dataDir}
+	if p := os.Getenv("DB_PATH"); p != "" && !strings.EqualFold(filepath.Dir(p), dataDir) {
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			return err
+		}
+		dirs = append(dirs, filepath.Dir(p))
+	}
+	for _, dir := range dirs {
+		// SID вместо имён групп — имена локализованы («Администраторы»).
+		out, err := exec.Command("icacls", dir, "/inheritance:r",
+			"/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", serviceAccount+":(OI)(CI)M").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("icacls %s: %v: %s", dir, err, out)
+		}
 	}
 	fmt.Println("данные:", dataDir)
+
+	// 5. Настройки — в env-файл (переменные из реестра прежних версий переносятся туда).
+	if err := saveServiceEnv(filepath.Join(dataDir, "lifelog.env")); err != nil {
+		return err
+	}
 
 	// 6. Запуск.
 	if err := s.Start(); err != nil {
@@ -246,53 +263,56 @@ func stopService(s *mgr.Service) {
 const serviceKey = `SYSTEM\CurrentControlSet\Services\` + serviceName
 
 // saveServiceEnv пишет заданные переменные в значение Environment службы.
-func saveServiceEnv() error {
-	// Слияние с прежними настройками: заданные сейчас переменные заменяют старые,
-	// остальные сохраняются; значение "-" удаляет переменную.
-	vars := serviceEnv()
-	changed := false
+// saveServiceEnv записывает в env-файл переменные, заданные сейчас в окружении,
+// поверх прежних ("-" — закомментировать), переносит туда значения из реестра
+// (так хранили настройки прежние версии) и удаляет их из реестра.
+func saveServiceEnv(path string) error {
+	data, err := os.ReadFile(path)
+	created := false
+	if os.IsNotExist(err) {
+		data, created = []byte(envTemplate), true
+	} else if err != nil {
+		return err
+	}
+	current := parseEnvFile(data)
+	set := map[string]string{}
+	legacy := serviceEnv()
+	for k, v := range legacy {
+		if current[k] == "" {
+			set[k] = v
+		}
+	}
 	for _, k := range envKeys {
-		v, ok := os.LookupEnv(k)
-		if !ok || v == "" {
+		if v, ok := os.LookupEnv(k); ok && v != "" {
+			set[k] = v
+		}
+	}
+	if len(set) > 0 || created {
+		tmp := path + ".tmp"
+		if err := os.WriteFile(tmp, updateEnvFile(data, set, envKeys), 0o640); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			return err
+		}
+	}
+	if len(legacy) > 0 {
+		if key, err := registry.OpenKey(registry.LOCAL_MACHINE, serviceKey, registry.SET_VALUE); err == nil {
+			key.DeleteValue("Environment")
+			key.Close()
+		}
+	}
+	for _, k := range envKeys {
+		v, ok := set[k]
+		if !ok {
 			continue
 		}
-		changed = true
-		if v == "-" {
-			delete(vars, k)
-		} else {
-			vars[k] = v
+		if (k == "BOT_TOKEN" || k == "BASIC_AUTH_PASS") && v != "-" {
+			v = "***"
 		}
+		fmt.Printf("env: %s=%s\n", k, v)
 	}
-	if !changed {
-		return nil
-	}
-	var list []string
-	for _, k := range envKeys {
-		if v, ok := vars[k]; ok {
-			list = append(list, k+"="+v)
-		}
-	}
-	key, err := registry.OpenKey(registry.LOCAL_MACHINE, serviceKey, registry.SET_VALUE)
-	if err != nil {
-		return fmt.Errorf("реестр: %w", err)
-	}
-	defer key.Close()
-	if len(list) == 0 {
-		err = key.DeleteValue("Environment")
-	} else {
-		err = key.SetStringsValue("Environment", list)
-	}
-	if err != nil {
-		return fmt.Errorf("реестр: %w", err)
-	}
-	for _, v := range list {
-		for _, secret := range []string{"BASIC_AUTH_PASS=", "BOT_TOKEN="} {
-			if strings.HasPrefix(v, secret) {
-				v = secret + "***"
-			}
-		}
-		fmt.Println("env:", v)
-	}
+	fmt.Println("настройки:", path)
 	return nil
 }
 

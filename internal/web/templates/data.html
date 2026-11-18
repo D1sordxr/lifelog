@@ -22,6 +22,11 @@
     <span class="st block" data-copy-status aria-live="polite"></span>
   </form>
 
+  {{if .PIN}}
+  <h2>PIN</h2>
+  <a class="btn" href="/pin/change">Сменить PIN</a>
+  {{end}}
+
   <h2>Импорт CSV</h2>
   <form method="post" action="/import" enctype="multipart/form-data">
     <p class="muted small">Формат как у экспорта. Колонки по заголовку: <code>date, wake_at, bed_at, train_start, train_minutes, train_type, energy, report</code>; обязательна <code>wake_at</code>. Время — полное (<code>2026-01-31T07:30:00+03:00</code>, <code>2026-01-31 07:30</code>) или <code>ЧЧ:ММ</code> вместе с колонкой <code>date</code>; отбой раньше подъёма считается следующими сутками. Если день с такой датой подъёма уже есть — заполненные ячейки его обновят.</p>

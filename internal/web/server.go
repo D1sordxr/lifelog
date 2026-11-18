@@ -43,6 +43,7 @@ type Server struct {
 	version string // хэш статики для сброса кэша
 	mux     *http.ServeMux
 	handler http.Handler
+	cop     *http.CrossOriginProtection
 	sessKey []byte
 }
 
@@ -57,7 +58,8 @@ func New(st *store.Store, opt Options) *Server {
 	s.routes()
 	s.sessKey = sessionKey(opt.BotToken)
 	// POST только со своего origin (Sec-Fetch-Site/Origin) — защита от CSRF.
-	s.handler = http.NewCrossOriginProtection().Handler(s.mux)
+	s.cop = http.NewCrossOriginProtection()
+	s.handler = s.mux
 	return s
 }
 
@@ -79,6 +81,11 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /export.md", s.exportMD)
 	m.HandleFunc("POST /auth/telegram", s.authTelegram)
 	m.HandleFunc("POST /auth/download", s.downloadToken)
+	m.HandleFunc("GET /pin", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/", http.StatusSeeOther) })
+	m.HandleFunc("POST /pin", s.pinSubmit)
+	m.HandleFunc("POST /pin/lock", s.pinLock)
+	m.HandleFunc("GET /pin/change", s.pinChangePage)
+	m.HandleFunc("POST /pin/change", s.pinChange)
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
 
 	static, _ := fs.Sub(staticFS, "static")
@@ -99,7 +106,9 @@ func (s *Server) routes() {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")
-	w.Header().Set("X-Frame-Options", "DENY")
+	// Telegram Web открывает мини-приложение во фрейме: разрешаем только его
+	// (X-Frame-Options: DENY давал пустое окно).
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'self' https://web.telegram.org https://*.telegram.org")
 	if s.opt.AuthUser != "" && s.opt.AuthPass != "" && r.URL.Path != "/healthz" {
 		u, p, ok := r.BasicAuth()
 		if !ok || subtle.ConstantTimeCompare([]byte(u), []byte(s.opt.AuthUser)) != 1 ||
@@ -115,6 +124,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "внутренняя ошибка", http.StatusInternalServerError)
 		}
 	}()
+	if err := s.cop.Check(r); err != nil {
+		http.Error(w, "запрос с чужого сайта", http.StatusForbidden)
+		return
+	}
 	r, ok := s.authenticate(w, r)
 	if !ok {
 		return
@@ -168,8 +181,9 @@ type page struct {
 	Title  string
 	Active string
 	Data   any
-	Bare   bool // без навигации (страница входа)
-	TG     bool // подключить telegram-web-app.js
+	Bare   bool   // без навигации (вход, PIN)
+	TG     bool   // подключить telegram-web-app.js
+	Script string // скрипт страницы, по умолчанию app.js
 }
 
 func (s *Server) render(w http.ResponseWriter, status int, name string, p page) {
@@ -179,6 +193,9 @@ func (s *Server) render(w http.ResponseWriter, status int, name string, p page) 
 		return
 	}
 	p.TG = s.tgMode()
+	if p.Script == "" {
+		p.Script = "app.js"
+	}
 	var b strings.Builder
 	if err := t.ExecuteTemplate(&b, "layout", p); err != nil {
 		log.Printf("render %s: %v", name, err)

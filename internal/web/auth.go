@@ -25,6 +25,7 @@ import (
 //  3. каждый запрос: cookie → пользователь → снова проверка по allowlist
 //     (убрали из ALLOWED_USERS — доступ пропал после перезапуска).
 // Данным из initDataUnsafe и любым id из запроса сервер не доверяет.
+//  4. PIN (как экран блокировки): после входа нужен ещё и PIN — см. pin.go.
 
 const (
 	sessionCookie  = "lifelog_session"
@@ -73,17 +74,23 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (*http.Req
 	}
 	// Ссылка на скачивание экспорта для Telegram.WebApp.downloadFile: клиент Telegram
 	// качает файл сам, без cookie, поэтому в URL — короткоживущий подписанный токен.
+	viaDownload := false
 	if uid == 0 && strings.HasPrefix(r.URL.Path, "/export.") {
 		uid, _ = s.verifyToken("download", r.URL.Query().Get("dl"), now)
+		viaDownload = uid != 0 // токен выдаётся только разблокированной сессии
 	}
 	if uid != 0 {
 		u, err := s.st.UserByID(r.Context(), uid)
 		if err == nil && s.opt.Allow.Allowed(u.TGID, u.Username) {
-			return r.WithContext(context.WithValue(r.Context(), userKey{}, u)), true
+			r = r.WithContext(context.WithValue(r.Context(), userKey{}, u))
+			if viaDownload {
+				return r, true
+			}
+			return s.pinGate(w, r, u)
 		}
 	}
 	if r.Method == http.MethodGet && !strings.HasPrefix(r.URL.Path, "/export.") {
-		s.render(w, http.StatusOK, "auth.html", page{Title: "Вход", Bare: true})
+		s.render(w, http.StatusOK, "auth.html", page{Title: "Вход", Bare: true, Script: "auth.js"})
 	} else {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "нужен вход через Telegram"})
 	}

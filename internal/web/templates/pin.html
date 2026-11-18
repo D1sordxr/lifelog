@@ -1,0 +1,15 @@
+{{define "content"}}
+<div class="pin" data-mode="{{.Mode}}" data-length="{{.Length}}">
+  <h1 id="pin-title">{{if eq .Mode "setup"}}Придумай PIN{{else if eq .Mode "change"}}Текущий PIN{{else}}Введи PIN{{end}}</h1>
+  <p class="sub" id="pin-msg" aria-live="polite">{{if eq .Mode "setup"}}6 цифр. Сбросить его можно только на сервере.{{else}}&nbsp;{{end}}</p>
+  <div class="dots" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+  <div class="keypad" role="group" aria-label="Цифры">
+    <button type="button" data-k="1">1</button><button type="button" data-k="2">2</button><button type="button" data-k="3">3</button>
+    <button type="button" data-k="4">4</button><button type="button" data-k="5">5</button><button type="button" data-k="6">6</button>
+    <button type="button" data-k="7">7</button><button type="button" data-k="8">8</button><button type="button" data-k="9">9</button>
+    <span></span><button type="button" data-k="0">0</button><button type="button" class="ghost" data-k="del" aria-label="Стереть">⌫</button>
+  </div>
+  {{if eq .Mode "change"}}<p class="gap"><a href="/data">Отмена</a></p>{{end}}
+  <noscript><p class="muted">Для ввода PIN нужен JavaScript.</p></noscript>
+</div>
+{{end}}

@@ -47,7 +47,13 @@
       return fetch(url, { method: "POST", body: body, credentials: "same-origin" })
         .then(function (r) {
           return r.json().then(function (j) {
-            if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+            if (!r.ok) {
+              if (j.locked) { // истекла разблокировка: сохраним значение и покажем PIN
+                stash(name, value);
+                location.reload();
+              }
+              throw new Error(j.error || ("HTTP " + r.status));
+            }
             return j;
           });
         })
@@ -60,6 +66,16 @@
         })
         .catch(function (e) { flash(st, "ошибка: " + e.message, "err"); });
     }
+
+    // Значения, не сохранённые из-за блокировки, — досохраняем после ввода PIN.
+    function stashKey(name) { return "lifelog-pending-" + form.dataset.id + "-" + name; }
+    function stash(name, value) { try { sessionStorage.setItem(stashKey(name), value); } catch (e) {} }
+    Array.prototype.forEach.call(form.elements, function (el) {
+      if (!el.name) return;
+      var v = null;
+      try { v = sessionStorage.getItem(stashKey(el.name)); sessionStorage.removeItem(stashKey(el.name)); } catch (e) {}
+      if (v !== null) { el.value = v; save(el, v); }
+    });
 
     form.addEventListener("change", function (e) {
       if (e.target.name && e.target.type !== "hidden") save(e.target);

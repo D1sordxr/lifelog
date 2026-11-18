@@ -44,6 +44,7 @@ func (s *Server) importCSV(w http.ResponseWriter, r *http.Request) {
 	n, _ := s.days(r).Count(r.Context())
 	now := s.opt.Now().In(s.loc)
 	data := dataPageData{
+		PIN:   s.tgMode(),
 		From:  now.AddDate(0, 0, -29).Format("2006-01-02"),
 		To:    now.Format("2006-01-02"),
 		Count: n,

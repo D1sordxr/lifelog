@@ -9,7 +9,8 @@ Group=lifelog
 ExecStart=/opt/lifelog/lifelog
 Environment=ADDR=127.0.0.1:8080
 Environment=DB_PATH=/var/lib/lifelog/lifelog.db
-# Environment=TZ=Europe/Moscow
+# Остальное (TZ, BOT_TOKEN, ALLOWED_USERS, WEBAPP_URL) — в env-файле, chmod 600.
+EnvironmentFile=-/etc/lifelog/lifelog.env
 Restart=always
 RestartSec=5
 

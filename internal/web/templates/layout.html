@@ -31,6 +31,7 @@
 {{template "content" .Data}}
 </main>
 </div>
-<script src="{{static (or (and .Bare "auth.js") "app.js")}}" defer></script>
+{{if and .TG (not .Bare)}}<form method="post" action="/pin/lock" class="lockbar"><button class="link">Заблокировать</button></form>{{end}}
+<script src="{{static .Script}}" defer></script>
 </body>
 </html>{{end}}

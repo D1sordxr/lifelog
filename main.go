@@ -3,6 +3,7 @@
 // Запуск:   lifelog            — HTTP-сервер (адрес из ADDR)
 //
 //	lifelog backup     — разовая копия базы в BACKUP_DIR
+//	lifelog reset-pin <telegram id> — сбросить PIN пользователя
 //	lifelog install    — (Windows) установить/обновить службу
 //	lifelog uninstall  — (Windows) удалить службу (данные остаются)
 package main
@@ -29,6 +30,8 @@ import (
 )
 
 // envKeys — все переменные окружения, которые читает приложение.
+// Все они также читаются из env-файла (ENV_FILE; у службы Windows —
+// %ProgramData%\lifelog\lifelog.env).
 var envKeys = []string{"ADDR", "DB_PATH", "TZ", "BACKUP_DIR", "BACKUP_KEEP", "BASIC_AUTH_USER", "BASIC_AUTH_PASS",
 	"BOT_TOKEN", "ALLOWED_USERS", "WEBAPP_URL"}
 
@@ -46,22 +49,42 @@ type config struct {
 }
 
 func env(key, def string) string {
-	if v := os.Getenv(key); v != "" {
+	if v := getenv(key); v != "" {
 		return v
 	}
 	return def
 }
 
-func loadConfig() (config, error) {
+// loadConfig читает настройки. admin — служебная команда (backup, reset-pin),
+// запущенная вручную на сервере: по умолчанию берутся env-файл и база службы.
+func loadConfig(admin bool) (config, error) {
+	envPath := os.Getenv("ENV_FILE")
+	if envPath == "" {
+		envPath = defaultEnvFile()
+		if admin {
+			envPath = adminEnvFile()
+		}
+	}
+	fe, err := readEnvFile(envPath)
+	if err != nil {
+		return config{}, fmt.Errorf("env-файл: %w", err)
+	}
+	fileEnv = fe
 	c := config{
 		Addr:      env("ADDR", "127.0.0.1:8080"),
 		DBPath:    env("DB_PATH", defaultDBPath()),
 		Loc:       time.Local,
-		AuthUser:  os.Getenv("BASIC_AUTH_USER"),
-		AuthPass:  os.Getenv("BASIC_AUTH_PASS"),
-		BotToken:  strings.TrimSpace(os.Getenv("BOT_TOKEN")),
-		Allowed:   tg.ParseAllowlist(tg.SplitList(os.Getenv("ALLOWED_USERS"))),
-		WebAppURL: strings.TrimSpace(os.Getenv("WEBAPP_URL")),
+		AuthUser:  getenv("BASIC_AUTH_USER"),
+		AuthPass:  getenv("BASIC_AUTH_PASS"),
+		BotToken:  strings.TrimSpace(getenv("BOT_TOKEN")),
+		Allowed:   tg.ParseAllowlist(tg.SplitList(getenv("ALLOWED_USERS"))),
+		WebAppURL: strings.TrimSpace(getenv("WEBAPP_URL")),
+	}
+	if admin && getenv("DB_PATH") == "" {
+		if _, err := os.Stat(adminDBPath()); err == nil {
+			c.DBPath = adminDBPath()
+			c.BackupDir = env("BACKUP_DIR", filepath.Join(filepath.Dir(c.DBPath), "backups"))
+		}
 	}
 	if c.BotToken != "" && c.Allowed.Len() == 0 {
 		return c, fmt.Errorf("BOT_TOKEN задан, а ALLOWED_USERS пуст — войти не сможет никто")
@@ -69,7 +92,7 @@ func loadConfig() (config, error) {
 	if c.WebAppURL != "" && !strings.HasPrefix(c.WebAppURL, "https://") {
 		return c, fmt.Errorf("WEBAPP_URL должен начинаться с https:// (требование Telegram)")
 	}
-	if tz := os.Getenv("TZ"); tz != "" {
+	if tz := getenv("TZ"); tz != "" {
 		loc, err := time.LoadLocation(tz)
 		if err != nil {
 			return c, fmt.Errorf("TZ=%q: %w", tz, err)
@@ -98,7 +121,7 @@ func main() {
 		return
 	}
 
-	cfg, err := loadConfig()
+	cfg, err := loadConfig(cmd == "backup" || cmd == "reset-pin")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -107,8 +130,10 @@ func main() {
 		err = runPlatform(cfg)
 	case "backup":
 		err = backupOnce(cfg)
+	case "reset-pin":
+		err = resetPIN(cfg, os.Args[2:])
 	case "-h", "--help", "help":
-		fmt.Println("usage: lifelog [backup|install|uninstall]")
+		fmt.Println("usage: lifelog [backup | reset-pin <telegram id> | install | uninstall]")
 		return
 	default:
 		err = fmt.Errorf("unknown command %q", cmd)
@@ -200,5 +225,25 @@ func backupOnce(cfg config) error {
 	} else {
 		fmt.Println("создана копия", path)
 	}
+	return nil
+}
+
+func resetPIN(cfg config, args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: lifelog reset-pin <telegram id>")
+	}
+	tgID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return fmt.Errorf("telegram id — число: %w", err)
+	}
+	st, err := store.Open(cfg.DBPath, cfg.Loc)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	if err := st.ResetPIN(context.Background(), tgID); err != nil {
+		return err
+	}
+	fmt.Printf("PIN пользователя %d сброшен (база %s). При следующем входе он задаст новый.\n", tgID, cfg.DBPath)
 	return nil
 }
