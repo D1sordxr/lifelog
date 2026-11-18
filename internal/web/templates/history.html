@@ -1,0 +1,19 @@
+{{define "content"}}
+  <h1>История</h1>
+  {{if not .Rows}}<p class="sub">Пока пусто.</p>{{end}}
+  <div class="list">
+  {{range .Rows}}
+    <a class="item" href="/days/{{.ID}}">
+      <div class="top"><b>{{.Date}}</b>{{if .Energy}}<span class="muted">энергия {{.Energy}}</span>{{end}}</div>
+      <div class="meta">{{.Wake}} → {{if .Open}}…{{else}}{{.Bed}}{{end}} · сон {{.Sleep}}{{if .Train}} · {{.Train}}{{end}}</div>
+      {{if .Report}}<div class="rep">{{.Report}}</div>{{end}}
+    </a>
+  {{end}}
+  </div>
+  {{if or .HasPrev .HasNext}}
+  <div class="pager bottom">
+    {{if .HasPrev}}<a href="/history?p={{.PrevPage}}">← новее</a>{{else}}<span></span>{{end}}
+    {{if .HasNext}}<a href="/history?p={{.NextPage}}">старше →</a>{{else}}<span></span>{{end}}
+  </div>
+  {{end}}
+{{end}}

@@ -1,0 +1,11 @@
+{{define "content"}}
+  <div class="pager">
+    {{if .Day.PrevID}}<a href="/days/{{.Day.PrevID}}" aria-label="Предыдущий день">←</a>{{else}}<span></span>{{end}}
+    <h1>{{.Day.DateLong}}</h1>
+    {{if .Day.NextID}}<a href="/days/{{.Day.NextID}}" aria-label="Следующий день">→</a>{{else}}<span></span>{{end}}
+  </div>
+  {{template "dayform" .}}
+  <form method="post" action="/days/{{.Day.ID}}/delete" class="gap" data-confirm="Удалить этот день целиком?">
+    <button class="link danger">Удалить день</button>
+  </form>
+{{end}}

@@ -1,0 +1,16 @@
+{{define "content"}}
+  <h1>Сон</h1>
+  <div class="seg" role="group" aria-label="Период">
+    {{range .Options}}<a href="/chart?d={{.}}"{{if eq . $.Days}} class="on" aria-current="page"{{end}}>{{.}} дн</a>{{end}}
+  </div>
+  <div class="chart">{{.SVG}}</div>
+  <p class="muted small center">По горизонтали — дни (дата подъёма), по вертикали — время суток. Полоса — от отбоя до подъёма; точка — подъём без известного отбоя.</p>
+  {{if .AvgWake}}
+  <dl class="stats">
+    {{if .AvgSleep}}<div><dt>Средний сон</dt><dd>{{.AvgSleep}}</dd></div>{{end}}
+    {{if .AvgBed}}<div><dt>Отбой</dt><dd>{{.AvgBed}} <span class="muted">{{.SpreadBed}}</span></dd></div>{{end}}
+    <div><dt>Подъём</dt><dd>{{.AvgWake}} <span class="muted">{{.SpreadWake}}</span></dd></div>
+    <div><dt>Ночей с данными</dt><dd>{{.Nights}}</dd></div>
+  </dl>
+  {{end}}
+{{end}}

@@ -1,0 +1,28 @@
+{{define "content"}}
+{{if .Day}}
+  <h1>{{.Day.DateLong}}</h1>
+  <p class="sub">день идёт</p>
+  {{if .Day.Stale}}
+  <div class="notice">
+    <p>Похоже, отбой не отмечен — день открыт больше 20 часов. Нажми «Лёг сейчас» или поправь отбой в истории, либо начни новый день.</p>
+    <form method="post" action="/wake"><button class="btn">Встал сейчас — новый день</button></form>
+  </div>
+  {{end}}
+  {{template "dayform" .}}
+  <form method="post" action="/days/{{.Day.ID}}/bed" class="gap">
+    <button class="btn primary big">Лёг сейчас</button>
+  </form>
+{{else}}
+  <div class="hello">
+    {{if .LastID}}
+    <p class="muted">Последний день — <a href="/days/{{.LastID}}">{{.LastDate}}</a>, отбой в {{.LastBed}}.</p>
+    {{else}}
+    <p class="muted">Записей пока нет.</p>
+    {{end}}
+    <form method="post" action="/wake">
+      <button class="btn primary big">Встал сейчас</button>
+    </form>
+    <p class="muted small">Время подъёма можно будет поправить.</p>
+  </div>
+{{end}}
+{{end}}

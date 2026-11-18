@@ -1,0 +1,24 @@
+# systemd-юнит для Linux-сервера. См. README → «Linux (systemd)».
+[Unit]
+Description=Lifelog (личный журнал дня)
+After=network.target
+
+[Service]
+User=lifelog
+Group=lifelog
+ExecStart=/opt/lifelog/lifelog
+Environment=ADDR=127.0.0.1:8080
+Environment=DB_PATH=/var/lib/lifelog/lifelog.db
+# Environment=TZ=Europe/Moscow
+Restart=always
+RestartSec=5
+
+# Песочница: писать можно только в /var/lib/lifelog
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/lifelog
+
+[Install]
+WantedBy=multi-user.target

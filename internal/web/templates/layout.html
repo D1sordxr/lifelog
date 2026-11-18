@@ -1,0 +1,34 @@
+{{define "layout"}}<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#eeeeee" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1f1f1f" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Журнал">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="{{static "icon-180.png"}}">
+<link rel="icon" type="image/png" href="{{static "icon-192.png"}}">
+<link rel="stylesheet" href="{{static "style.css"}}">
+<title>{{.Title}} · Журнал</title>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <a href="/"{{if eq .Active "today"}} class="on" aria-current="page"{{end}}>Сегодня</a>
+  <a href="/history"{{if eq .Active "history"}} class="on" aria-current="page"{{end}}>История</a>
+  <a href="/chart"{{if eq .Active "chart"}} class="on" aria-current="page"{{end}}>График</a>
+  <a href="/data"{{if eq .Active "data"}} class="on" aria-current="page"{{end}}>Данные</a>
+</nav>
+<main class="card">
+{{template "content" .Data}}
+</main>
+</div>
+<script src="{{static "app.js"}}" defer></script>
+</body>
+</html>{{end}}

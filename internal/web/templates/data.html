@@ -1,0 +1,35 @@
+{{define "content"}}
+  <h1>Данные</h1>
+  <p class="sub">Всего дней: {{.Count}}</p>
+
+  {{if .Result}}<div class="notice ok">Импорт готов: добавлено {{.Result.Added}}, обновлено {{.Result.Updated}}.</div>{{end}}
+  {{if .Message}}<div class="notice">{{.Message}}</div>{{end}}
+  {{if .Errors}}<div class="notice err"><p>Ничего не импортировано:</p><ul>{{range .Errors}}<li>{{.}}</li>{{end}}</ul></div>{{end}}
+
+  <h2>Экспорт</h2>
+  <form method="get" action="/export.md" class="export">
+    <div class="row">
+      <div class="field"><label for="from">С</label><input type="date" id="from" name="from" value="{{.From}}"></div>
+      <div class="field"><label for="to">По</label><input type="date" id="to" name="to" value="{{.To}}"></div>
+    </div>
+    <p class="muted small">Пустые даты — за всё время. Длительность сна уже посчитана.</p>
+    <div class="btns">
+      <button class="btn" formaction="/export.md">Markdown</button>
+      <button class="btn" formaction="/export.csv">CSV</button>
+      <button class="btn" formaction="/export.json">JSON</button>
+    </div>
+    <button type="button" class="btn primary gap" data-copy-md>Скопировать Markdown для чата</button>
+    <span class="st block" data-copy-status aria-live="polite"></span>
+  </form>
+
+  <h2>Импорт CSV</h2>
+  <form method="post" action="/import" enctype="multipart/form-data">
+    <p class="muted small">Формат как у экспорта. Колонки по заголовку: <code>date, wake_at, bed_at, train_start, train_minutes, train_type, energy, report</code>; обязательна <code>wake_at</code>. Время — полное (<code>2026-01-31T07:30:00+03:00</code>, <code>2026-01-31 07:30</code>) или <code>ЧЧ:ММ</code> вместе с колонкой <code>date</code>; отбой раньше подъёма считается следующими сутками. Если день с такой датой подъёма уже есть — заполненные ячейки его обновят.</p>
+    <div class="field"><input type="file" name="file" accept=".csv,text/csv,text/plain"></div>
+    <div class="field">
+      <label for="csv">или вставь текст</label>
+      <textarea id="csv" name="csv" rows="5" placeholder="date,wake_at,bed_at,energy,report&#10;2026-01-31,07:30,23:45,4,Хороший день"></textarea>
+    </div>
+    <button class="btn">Импортировать</button>
+  </form>
+{{end}}

@@ -1,0 +1,53 @@
+{{define "dayform"}}{{$v := .Day.Values}}
+<form class="day" method="post" action="/days/{{.Day.ID}}" data-id="{{.Day.ID}}">
+  <input type="hidden" name="back" value="{{if .Day.ShowBed}}/days/{{.Day.ID}}{{else}}/{{end}}">
+
+  <div class="field">
+    <label for="wake_at">Подъём <span class="st" aria-live="polite"></span></label>
+    <input type="datetime-local" id="wake_at" name="wake_at" value="{{$v.wake_at}}" required>
+  </div>
+
+  {{if .Day.ShowBed}}
+  <div class="field">
+    <label for="bed_at">Отбой <span class="st" aria-live="polite"></span></label>
+    <input type="datetime-local" id="bed_at" name="bed_at" value="{{$v.bed_at}}">
+  </div>
+  {{end}}
+  <p class="muted small">Сон перед этим днём: <b data-sleep>{{.Day.Sleep}}</b></p>
+
+  <h2>Тренировка</h2>
+  <div class="field">
+    <label for="train_start">Начало <span class="st" aria-live="polite"></span></label>
+    <div class="row">
+      <input type="datetime-local" id="train_start" name="train_start" value="{{$v.train_start}}">
+      <button type="button" class="btn small" data-now="train_start">сейчас</button>
+    </div>
+  </div>
+  <div class="row">
+    <div class="field">
+      <label for="train_minutes">Минут <span class="st" aria-live="polite"></span></label>
+      <input type="number" id="train_minutes" name="train_minutes" value="{{$v.train_minutes}}" inputmode="numeric" min="0" max="1440" step="1">
+    </div>
+    <div class="field grow">
+      <label for="train_type">Тип <span class="st" aria-live="polite"></span></label>
+      <input type="text" id="train_type" name="train_type" value="{{$v.train_type}}" list="train-types" autocomplete="off" autocapitalize="none" maxlength="100">
+    </div>
+  </div>
+  <datalist id="train-types">{{range .Day.TrainTypes}}<option value="{{.}}">{{end}}</datalist>
+
+  <div class="field">
+    <span class="lbl">Энергия <span class="st" aria-live="polite"></span></span>
+    <input type="hidden" name="energy" value="{{$v.energy}}">
+    <div class="energy" role="group" aria-label="Энергия">
+      {{range .Energies}}<button type="button" data-energy="{{.}}" aria-pressed="{{if eq . $.Day.Energy}}true{{else}}false{{end}}">{{.}}</button>{{end}}
+    </div>
+  </div>
+
+  <div class="field">
+    <label for="report">Отчёт за день <span class="st" aria-live="polite"></span></label>
+    <textarea id="report" name="report" rows="7">{{$v.report}}</textarea>
+  </div>
+
+  <noscript><button class="btn">Сохранить</button></noscript>
+</form>
+{{end}}

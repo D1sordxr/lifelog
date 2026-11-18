@@ -1,0 +1,11 @@
+# бинарники
+/lifelog
+/lifelog.exe
+*.exe~
+# локальная база и копии
+*.db
+*.db-wal
+*.db-shm
+*.db.tmp
+/backups/
+*.log
