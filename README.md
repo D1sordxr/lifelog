@@ -1,8 +1,8 @@
 # lifelog
 
 Минималистичный личный веб-журнал дня: подъём, тренировка, энергия, отчёт, отбой.
-Один пользователь, один бинарник, одна база SQLite. Заполняется с телефона и ПК,
-доступен только внутри своей сети Tailscale.
+Один бинарник, одна база SQLite. Заполняется с телефона и ПК — в браузере или как
+Telegram Mini App; доступен только внутри своей сети Tailscale.
 
 - **Одна запись = одни сутки бодрствования** (от подъёма до отбоя), а не календарный день.
   Дата дня — локальная дата подъёма; отбой может быть уже следующей датой.
@@ -25,6 +25,7 @@
 | `POST /wake` | новый день с подъёмом «сейчас» |
 | `POST /days/{id}/field` | автосохранение одного поля: `name`, `value` (`now` для времени) → JSON |
 | `POST /days/{id}/bed` | отбой «сейчас» |
+| `POST /auth/telegram` | вход из Telegram Mini App (`init_data`) |
 | `GET /healthz` | проверка живости |
 
 Во всех экспортах есть вычисленная длительность сна. Markdown удобно вставлять в чат
@@ -51,7 +52,10 @@ go test ./...
 | `TZ` | часовой пояс системы | пояс для отображения и ввода, например `Europe/Moscow` |
 | `BACKUP_DIR` | `<папка базы>/backups` | куда класть ежедневные копии |
 | `BACKUP_KEEP` | `30` | сколько копий хранить |
-| `BASIC_AUTH_USER`, `BASIC_AUTH_PASS` | — | если заданы обе — включается basic auth |
+| `BASIC_AUTH_USER`, `BASIC_AUTH_PASS` | — | если заданы обе — включается basic auth (не сочетать с Telegram) |
+| `BOT_TOKEN` | — | токен бота от @BotFather; включает вход только через Telegram |
+| `ALLOWED_USERS` | — | кому можно входить: Telegram id и/или `@username` через запятую; первый — владелец |
+| `WEBAPP_URL` | — | `https://…` адрес приложения; если задан вместе с `BOT_TOKEN`, запускается бот |
 
 ## Установка на Windows (служба)
 
@@ -82,7 +86,8 @@ $env:TZ = "Europe/Moscow"
 .\lifelog.exe install
 ```
 
-Если при `install` ни одна переменная не задана, прежние настройки службы не меняются.
+Заданные переменные записываются поверх прежних настроек службы, остальные не меняются.
+Удалить переменную: задать ей значение `-` и снова выполнить `install`.
 
 **Обновление:** `git pull`, `go build -o lifelog.exe .`, `.\lifelog.exe install`
 (служба остановится, exe заменится, служба запустится; данные не трогаются).
@@ -112,6 +117,64 @@ $env:TZ = "Europe/Moscow"
 
 Откройте `https://<машина>.<tailnet>.ts.net` в Safari (Tailscale на телефоне включён) →
 «Поделиться» → «На экран „Домой“». Приложение откроется без панелей браузера, как обычное.
+
+## Telegram Mini App
+
+Журнал можно открывать кнопкой в Telegram-боте. Тогда вход — только через Telegram
+и только для пользователей из `ALLOWED_USERS`; остальные видят
+«You are not allowed to use this app» (и в боте, и в приложении).
+
+1. Создайте бота у [@BotFather](https://t.me/BotFather) (`/newbot`) и возьмите токен.
+2. Узнайте свой Telegram id (например, у @userinfobot) или используйте `@username`.
+3. Установите (или обновите) службу с переменными:
+
+   ```powershell
+   $env:BOT_TOKEN     = "<токен>"
+   $env:ALLOWED_USERS = "<ваш id>,@<ваш username>"
+   $env:WEBAPP_URL    = "https://<машина>.<tailnet>.ts.net/"
+   .\lifelog.exe install
+   ```
+
+4. Напишите боту `/start` — придёт кнопка «Открыть журнал»; кнопка «Журнал»
+   появится и в меню чата.
+
+Бот работает через long polling (исходящие запросы к api.telegram.org), вебхук и
+публичный адрес не нужны. Мини-приложение открывается на устройстве, поэтому
+**Tailscale на телефоне должен быть включён** — как и для браузера.
+
+### Как устроен вход
+
+- Страница без сессии отдаёт экран входа; его JS отправляет строку
+  `Telegram.WebApp.initData` **целиком** на `POST /auth/telegram`.
+- Сервер пересчитывает подпись HMAC-SHA256 (ключ — `HMAC("WebAppData", BOT_TOKEN)`)
+  и сравнивает с `hash`, проверяет, что `auth_date` не старше часа, и только потом
+  берёт из неё id и username. Данным из `initDataUnsafe` и любым id из запроса сервер
+  не доверяет — без токена бота подделать подпись нельзя.
+- Пользователь сверяется с `ALLOWED_USERS` (совпадение по id **или** username),
+  затем ставится cookie сессии: подписана HMAC (ключ выводится из `BOT_TOKEN`),
+  `HttpOnly`, `Secure`, живёт 30 дней.
+- На **каждом** запросе пользователь снова проверяется по `ALLOWED_USERS`: убрали из
+  списка и перезапустили службу — доступ пропал сразу, даже с живой cookie.
+  Смена `BOT_TOKEN` обнуляет все сессии.
+- POST-запросы принимаются только со своего origin (`http.CrossOriginProtection`).
+- Экспорт в Telegram скачивается через `Telegram.WebApp.downloadFile`: клиент
+  качает файл без cookie, поэтому ссылка содержит подписанный токен на 5 минут,
+  годный только для `/export.*`.
+
+### Несколько пользователей
+
+Каждый день принадлежит пользователю (`days.user_id → users.id`), все запросы
+ограничены текущим пользователем: тестер видит только свой журнал и не может открыть
+чужой день даже по id. Чтобы дать кому-то попробовать — добавьте его id или
+`@username` в `ALLOWED_USERS` и выполните `install`; чтобы забрать доступ — уберите.
+Тестеру нужен доступ к вашему tailnet (Tailscale → Machines → Share).
+
+`users.id = 1` — владелец: ему принадлежат дни, записанные до включения Telegram;
+эту строку при первом входе занимает **первый** пользователь из `ALLOWED_USERS`.
+Без `BOT_TOKEN` приложение работает без входа от имени этого же пользователя.
+
+При включённом Telegram в обычном браузере (в том числе PWA на iPhone) тоже будет
+экран «You are not allowed to use this app» — вход только из Telegram.
 
 ## Linux (systemd)
 
@@ -157,11 +220,12 @@ date,wake_at,bed_at,train_minutes,train_type,energy,report
 main.go                     конфиг, запуск, команды backup/install/uninstall
 platform_windows.go         служба Windows: SCM, установка, права на папку данных
 platform_other.go           не-Windows: обычный процесс
-internal/store/             SQLite, миграции, Day, сон, текущий день, импорт, бэкапы
+internal/store/             SQLite, миграции, пользователи, Day, сон, текущий день, импорт, бэкапы
   migrations/NNNN_*.sql     версии схемы
   fields.go                 реестр редактируемых полей (разбор и проверка ввода)
 internal/export/            CSV / JSON / Markdown и разбор CSV
-internal/web/               обработчики, график (SVG на сервере), шаблоны, статика
+internal/tg/                Telegram: проверка initData, allowlist, бот (long polling)
+internal/web/               обработчики, вход, график (SVG на сервере), шаблоны, статика
 tools/genicon/              генератор иконок PWA (go run ./tools/genicon)
 deploy/linux/               systemd-юнит
 ```
@@ -176,6 +240,9 @@ deploy/linux/               systemd-юнит
 применяются по порядку номеров те, которых нет в таблице `schema_migrations`, каждая в своей
 транзакции. Уже применённые файлы не меняйте — добавляйте новые.
 
+- `0001_init.sql` — таблица `days`;
+- `0002_users.sql` — таблица `users` и `days.user_id` (старые дни → `users.id = 1`).
+
 ### Как добавить новое поле
 
 Пример: «шаги за день».
@@ -185,7 +252,7 @@ deploy/linux/               systemd-юнит
    ALTER TABLE days ADD COLUMN steps INTEGER;
    ```
 2. `internal/store/day.go`: поле `Steps *int` в `Day`; колонку — в `dayCols`, `scanDay`,
-   `insertDay`, `updateDay`.
+   `insertDay`, `updateDay` (`user_id` подставляется автоматически).
 3. `internal/store/fields.go`: запись в `Fields` с `Set` (разбор и проверка) и `Get`.
    Через реестр поле сразу заработает в автосохранении, сохранении формы и импорте.
 4. `internal/web/templates/_dayform.html`: `<input name="steps" value="{{$v.steps}}">` в блоке `.field`.

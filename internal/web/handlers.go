@@ -43,13 +43,13 @@ func (s *Server) view(r *http.Request, d *store.Day) (*dayView, error) {
 	if d.Energy != nil {
 		v.Energy = *d.Energy
 	}
-	sl, err := s.st.SleepBefore(r.Context(), d)
+	sl, err := s.days(r).SleepBefore(r.Context(), d)
 	if err != nil {
 		return nil, err
 	}
 	v.Sleep = ru.Dur(sl)
 	v.Stale = d.BedAt == nil && s.opt.Now().Sub(d.WakeAt) > store.StaleAfter
-	if v.TrainTypes, err = s.st.TrainTypes(r.Context()); err != nil {
+	if v.TrainTypes, err = s.days(r).TrainTypes(r.Context()); err != nil {
 		return nil, err
 	}
 	return v, nil
@@ -83,7 +83,7 @@ type todayData struct {
 
 func (s *Server) today(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	latest, err := s.st.Latest(ctx)
+	latest, err := s.days(r).Latest(ctx)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -103,7 +103,7 @@ func (s *Server) today(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) wake(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.st.Wake(r.Context(), s.opt.Now()); err != nil {
+	if _, err := s.days(r).Wake(r.Context(), s.opt.Now()); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -115,7 +115,7 @@ func (s *Server) bed(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	d, err := s.st.Get(r.Context(), id)
+	d, err := s.days(r).Get(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
 		http.NotFound(w, r)
 		return
@@ -126,7 +126,7 @@ func (s *Server) bed(w http.ResponseWriter, r *http.Request) {
 	if d.BedAt == nil { // повторное нажатие не перезаписывает время
 		now := s.opt.Now().UTC().Truncate(time.Second)
 		d.BedAt = &now
-		if err := s.st.Save(r.Context(), d); err != nil {
+		if err := s.days(r).Save(r.Context(), d); err != nil {
 			s.inputOrFail(w, err)
 			return
 		}
@@ -147,7 +147,7 @@ func (s *Server) dayPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	d, err := s.st.Get(ctx, id)
+	d, err := s.days(r).Get(ctx, id)
 	if errors.Is(err, store.ErrNotFound) {
 		http.NotFound(w, r)
 		return
@@ -162,10 +162,10 @@ func (s *Server) dayPage(w http.ResponseWriter, r *http.Request) {
 	}
 	v.ShowBed = true
 	v.Stale = false
-	if p, err := s.st.Prev(ctx, d.WakeAt); err == nil && p != nil {
+	if p, err := s.days(r).Prev(ctx, d.WakeAt); err == nil && p != nil {
 		v.PrevID = p.ID
 	}
-	if n, err := s.st.Next(ctx, d.WakeAt); err == nil && n != nil {
+	if n, err := s.days(r).Next(ctx, d.WakeAt); err == nil && n != nil {
 		v.NextID = n.ID
 	}
 	s.render(w, http.StatusOK, "day.html", page{Title: v.DateLong, Active: "history", Data: dayPageData{v, energyOpts}})
@@ -187,7 +187,7 @@ func (s *Server) saveForm(w http.ResponseWriter, r *http.Request) {
 			values[f.Name] = r.PostForm.Get(f.Name)
 		}
 	}
-	if _, err := s.st.SetFields(r.Context(), id, values); err != nil {
+	if _, err := s.days(r).SetFields(r.Context(), id, values); err != nil {
 		s.inputOrFail(w, err)
 		return
 	}
@@ -215,7 +215,7 @@ func (s *Server) saveField(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PostForm.Get("name")
-	d, err := s.st.SetField(r.Context(), id, name, r.PostForm.Get("value"))
+	d, err := s.days(r).SetField(r.Context(), id, name, r.PostForm.Get("value"))
 	var ie *store.InputError
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -229,7 +229,7 @@ func (s *Server) saveField(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f, _ := store.FieldByName(name)
-	sl, _ := s.st.SleepBefore(r.Context(), d)
+	sl, _ := s.days(r).SleepBefore(r.Context(), d)
 	reply(http.StatusOK, map[string]any{"ok": true, "value": f.Get(d, s.loc), "sleep": ru.Dur(sl)})
 }
 
@@ -238,7 +238,7 @@ func (s *Server) deleteDay(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.st.Delete(r.Context(), id); err != nil && !errors.Is(err, store.ErrNotFound) {
+	if err := s.days(r).Delete(r.Context(), id); err != nil && !errors.Is(err, store.ErrNotFound) {
 		s.fail(w, err)
 		return
 	}
@@ -284,12 +284,12 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 	if pg < 0 {
 		pg = 0
 	}
-	entries, err := s.st.Page(ctx, historyPageSize, pg*historyPageSize)
+	entries, err := s.days(r).Page(ctx, historyPageSize, pg*historyPageSize)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	total, err := s.st.Count(ctx)
+	total, err := s.days(r).Count(ctx)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -351,7 +351,7 @@ type dataPageData struct {
 }
 
 func (s *Server) dataPage(w http.ResponseWriter, r *http.Request) {
-	n, err := s.st.Count(r.Context())
+	n, err := s.days(r).Count(r.Context())
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -393,7 +393,7 @@ func (s *Server) export(w http.ResponseWriter, r *http.Request, ext, ctype strin
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	entries, err := s.st.Range(r.Context(), from, to)
+	entries, err := s.days(r).Range(r.Context(), from, to)
 	if err != nil {
 		s.fail(w, err)
 		return

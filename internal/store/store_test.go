@@ -9,6 +9,8 @@ import (
 
 var tz = time.FixedZone("UTC+4", 4*60*60)
 
+var zeroT time.Time
+
 // lt — локальное время в tz.
 func lt(s string) time.Time {
 	t, err := time.ParseInLocation("2006-01-02 15:04", s, tz)
@@ -81,38 +83,38 @@ func TestCurrentDay(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
 
-	if d, err := s.Current(ctx); err != nil || d != nil {
+	if d, err := s.For(1).Current(ctx); err != nil || d != nil {
 		t.Fatalf("пустая база: want nil, got %v %v", d, err)
 	}
 
-	d1, err := s.Wake(ctx, lt("2026-11-17 07:00"))
+	d1, err := s.For(1).Wake(ctx, lt("2026-11-17 07:00"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cur, _ := s.Current(ctx); cur == nil || cur.ID != d1.ID {
+	if cur, _ := s.For(1).Current(ctx); cur == nil || cur.ID != d1.ID {
 		t.Fatalf("после подъёма текущий должен быть d1, got %v", cur)
 	}
 
 	s.SetClock(func() time.Time { return lt("2026-11-17 23:40") })
-	if _, err := s.SetField(ctx, d1.ID, "bed_at", "now"); err != nil {
+	if _, err := s.For(1).SetField(ctx, d1.ID, "bed_at", "now"); err != nil {
 		t.Fatal(err)
 	}
-	if cur, _ := s.Current(ctx); cur != nil {
+	if cur, _ := s.For(1).Current(ctx); cur != nil {
 		t.Fatalf("после отбоя текущего дня нет, got %v", cur)
 	}
 
 	// Старый день без отбоя + новый закрытый: текущего нет.
-	old, _ := s.Wake(ctx, lt("2026-11-10 07:00"))
+	old, _ := s.For(1).Wake(ctx, lt("2026-11-10 07:00"))
 	_ = old
-	if cur, _ := s.Current(ctx); cur != nil {
+	if cur, _ := s.For(1).Current(ctx); cur != nil {
 		t.Fatalf("старый открытый день не должен становиться текущим, got %v", cur)
 	}
 
-	d2, _ := s.Wake(ctx, lt("2026-11-18 07:30"))
-	if cur, _ := s.Current(ctx); cur == nil || cur.ID != d2.ID {
+	d2, _ := s.For(1).Wake(ctx, lt("2026-11-18 07:30"))
+	if cur, _ := s.For(1).Current(ctx); cur == nil || cur.ID != d2.ID {
 		t.Fatalf("want d2, got %v", cur)
 	}
-	sl, _ := s.SleepBefore(ctx, d2)
+	sl, _ := s.For(1).SleepBefore(ctx, d2)
 	if sl == nil || *sl != 7*time.Hour+50*time.Minute {
 		t.Fatalf("сон перед d2: want 7h50m, got %v", sl)
 	}
@@ -121,12 +123,12 @@ func TestCurrentDay(t *testing.T) {
 func TestWakeDoubleTap(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	a, _ := s.Wake(ctx, lt("2026-11-18 07:00"))
-	b, _ := s.Wake(ctx, lt("2026-11-18 07:00").Add(30*time.Second))
+	a, _ := s.For(1).Wake(ctx, lt("2026-11-18 07:00"))
+	b, _ := s.For(1).Wake(ctx, lt("2026-11-18 07:00").Add(30*time.Second))
 	if a.ID != b.ID {
 		t.Fatal("двойное нажатие создало второй день")
 	}
-	if n, _ := s.Count(ctx); n != 1 {
+	if n, _ := s.For(1).Count(ctx); n != 1 {
 		t.Fatalf("want 1 day, got %d", n)
 	}
 }
@@ -134,7 +136,7 @@ func TestWakeDoubleTap(t *testing.T) {
 func TestSetFieldValidation(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	d, _ := s.Wake(ctx, lt("2026-11-18 07:00"))
+	d, _ := s.For(1).Wake(ctx, lt("2026-11-18 07:00"))
 	for _, c := range []struct{ name, val string }{
 		{"energy", "6"},
 		{"energy", "abc"},
@@ -143,23 +145,23 @@ func TestSetFieldValidation(t *testing.T) {
 		{"wake_at", ""},
 		{"nope", "1"},
 	} {
-		if _, err := s.SetField(ctx, d.ID, c.name, c.val); err == nil {
+		if _, err := s.For(1).SetField(ctx, d.ID, c.name, c.val); err == nil {
 			t.Errorf("%s=%q: want error", c.name, c.val)
 		}
 	}
-	got, err := s.SetField(ctx, d.ID, "energy", "4")
+	got, err := s.For(1).SetField(ctx, d.ID, "energy", "4")
 	if err != nil || got.Energy == nil || *got.Energy != 4 {
 		t.Fatalf("energy=4: %v %v", got, err)
 	}
-	got, _ = s.SetField(ctx, d.ID, "energy", "")
+	got, _ = s.For(1).SetField(ctx, d.ID, "energy", "")
 	if got.Energy != nil {
 		t.Fatal("пустое значение должно очищать поле")
 	}
-	got, _ = s.SetField(ctx, d.ID, "bed_at", "2026-11-19T00:45") // после полуночи
+	got, _ = s.For(1).SetField(ctx, d.ID, "bed_at", "2026-11-19T00:45") // после полуночи
 	if got.BedAt == nil || !got.BedAt.Equal(lt("2026-11-19 00:45")) {
 		t.Fatalf("bed_at: %v", got.BedAt)
 	}
-	reread, _ := s.Get(ctx, d.ID)
+	reread, _ := s.For(1).Get(ctx, d.ID)
 	if !reread.BedAt.Equal(*got.BedAt) || !reread.WakeAt.Equal(d.WakeAt) {
 		t.Fatal("после перечитывания из базы времена не совпали")
 	}
@@ -168,12 +170,12 @@ func TestSetFieldValidation(t *testing.T) {
 func TestRangeUsesPrevDay(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	d1, _ := s.Wake(ctx, lt("2026-11-17 07:00"))
-	s.SetField(ctx, d1.ID, "bed_at", "2026-11-17T23:00")
-	s.Wake(ctx, lt("2026-11-18 07:00"))
+	d1, _ := s.For(1).Wake(ctx, lt("2026-11-17 07:00"))
+	s.For(1).SetField(ctx, d1.ID, "bed_at", "2026-11-17T23:00")
+	s.For(1).Wake(ctx, lt("2026-11-18 07:00"))
 
 	from, to, _ := DayBounds("2026-11-18", tz)
-	e, err := s.Range(ctx, from, to)
+	e, err := s.For(1).Range(ctx, from, to)
 	if err != nil || len(e) != 1 {
 		t.Fatalf("range: %v %v", e, err)
 	}
@@ -181,7 +183,7 @@ func TestRangeUsesPrevDay(t *testing.T) {
 		t.Fatalf("сон должен считаться по дню вне диапазона, got %v", e[0].Sleep)
 	}
 
-	page, _ := s.Page(ctx, 1, 0)
+	page, _ := s.For(1).Page(ctx, 1, 0)
 	if len(page) != 1 || page[0].Sleep == nil || *page[0].Sleep != 8*time.Hour {
 		t.Fatalf("page: %+v", page)
 	}
@@ -190,7 +192,7 @@ func TestRangeUsesPrevDay(t *testing.T) {
 func TestDailyBackup(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.Wake(ctx, lt("2026-11-18 07:00"))
+	s.For(1).Wake(ctx, lt("2026-11-18 07:00"))
 	dir := t.TempDir()
 	for i := 0; i < 5; i++ {
 		day := lt("2026-11-01 12:00").AddDate(0, 0, i)
@@ -212,7 +214,7 @@ func TestDailyBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Close()
-	if n, _ := b.Count(ctx); n != 1 {
+	if n, _ := b.For(1).Count(ctx); n != 1 {
 		t.Fatalf("в копии %d дней", n)
 	}
 }

@@ -41,7 +41,7 @@ func (s *Server) importCSV(w http.ResponseWriter, r *http.Request) {
 		src = strings.NewReader(text)
 	}
 
-	n, _ := s.st.Count(r.Context())
+	n, _ := s.days(r).Count(r.Context())
 	now := s.opt.Now().In(s.loc)
 	data := dataPageData{
 		From:  now.AddDate(0, 0, -29).Format("2006-01-02"),
@@ -60,7 +60,7 @@ func (s *Server) importCSV(w http.ResponseWriter, r *http.Request) {
 		data.Errors = perr
 		status = http.StatusBadRequest
 	default:
-		res, err := s.st.Import(r.Context(), rows)
+		res, err := s.days(r).Import(r.Context(), rows)
 		if err != nil {
 			s.fail(w, err)
 			return
@@ -70,7 +70,7 @@ func (s *Server) importCSV(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusBadRequest
 		} else {
 			data.Result = &res
-			data.Count, _ = s.st.Count(r.Context())
+			data.Count, _ = s.days(r).Count(r.Context())
 		}
 	}
 	s.render(w, status, "data.html", page{Title: "Данные", Active: "data", Data: data})

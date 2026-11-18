@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"lifelog/internal/store"
+	"lifelog/internal/tg"
 )
 
 //go:embed templates/*.html
@@ -28,6 +29,10 @@ type Options struct {
 	AuthUser, AuthPass string
 	// Now — часы (для тестов). По умолчанию time.Now.
 	Now func() time.Time
+	// BotToken включает вход через Telegram Mini App: без него — один
+	// пользователь без входа. Allow — кому разрешён вход.
+	BotToken string
+	Allow    tg.Allowlist
 }
 
 type Server struct {
@@ -37,6 +42,8 @@ type Server struct {
 	pages   map[string]*template.Template
 	version string // хэш статики для сброса кэша
 	mux     *http.ServeMux
+	handler http.Handler
+	sessKey []byte
 }
 
 // New собирает обработчик.
@@ -48,6 +55,9 @@ func New(st *store.Store, opt Options) *Server {
 	s.version = staticVersion()
 	s.parseTemplates()
 	s.routes()
+	s.sessKey = sessionKey(opt.BotToken)
+	// POST только со своего origin (Sec-Fetch-Site/Origin) — защита от CSRF.
+	s.handler = http.NewCrossOriginProtection().Handler(s.mux)
 	return s
 }
 
@@ -67,6 +77,8 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /export.csv", s.exportCSV)
 	m.HandleFunc("GET /export.json", s.exportJSON)
 	m.HandleFunc("GET /export.md", s.exportMD)
+	m.HandleFunc("POST /auth/telegram", s.authTelegram)
+	m.HandleFunc("POST /auth/download", s.downloadToken)
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
 
 	static, _ := fs.Sub(staticFS, "static")
@@ -103,7 +115,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "внутренняя ошибка", http.StatusInternalServerError)
 		}
 	}()
-	s.mux.ServeHTTP(w, r)
+	r, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	s.handler.ServeHTTP(w, r)
 }
 
 func cacheStatic(h http.Handler) http.Handler {
@@ -152,6 +168,8 @@ type page struct {
 	Title  string
 	Active string
 	Data   any
+	Bare   bool // без навигации (страница входа)
+	TG     bool // подключить telegram-web-app.js
 }
 
 func (s *Server) render(w http.ResponseWriter, status int, name string, p page) {
@@ -160,6 +178,7 @@ func (s *Server) render(w http.ResponseWriter, status int, name string, p page) 
 		http.Error(w, "no template "+name, http.StatusInternalServerError)
 		return
 	}
+	p.TG = s.tgMode()
 	var b strings.Builder
 	if err := t.ExecuteTemplate(&b, "layout", p); err != nil {
 		log.Printf("render %s: %v", name, err)

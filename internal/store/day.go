@@ -155,11 +155,11 @@ func nullInt(p *int) any {
 	return *p
 }
 
-func insertDay(ctx context.Context, q querier, d *Day, now time.Time) error {
+func insertDay(ctx context.Context, q querier, uid int64, d *Day, now time.Time) error {
 	res, err := q.ExecContext(ctx, `INSERT INTO days
-		(wake_at, bed_at, train_start, train_minutes, train_type, energy, report, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		fmtTime(d.WakeAt), fmtTimePtr(d.BedAt), fmtTimePtr(d.TrainStart), nullInt(d.TrainMinutes),
+		(user_id, wake_at, bed_at, train_start, train_minutes, train_type, energy, report, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		uid, fmtTime(d.WakeAt), fmtTimePtr(d.BedAt), fmtTimePtr(d.TrainStart), nullInt(d.TrainMinutes),
 		nullStr(d.TrainType), nullInt(d.Energy), nullStr(d.Report), fmtTime(now), fmtTime(now))
 	if err != nil {
 		return err
@@ -169,13 +169,13 @@ func insertDay(ctx context.Context, q querier, d *Day, now time.Time) error {
 	return err
 }
 
-func updateDay(ctx context.Context, q querier, d *Day, now time.Time) error {
+func updateDay(ctx context.Context, q querier, uid int64, d *Day, now time.Time) error {
 	res, err := q.ExecContext(ctx, `UPDATE days SET
 		wake_at = ?, bed_at = ?, train_start = ?, train_minutes = ?, train_type = ?,
 		energy = ?, report = ?, updated_at = ?
-		WHERE id = ?`,
+		WHERE id = ? AND user_id = ?`,
 		fmtTime(d.WakeAt), fmtTimePtr(d.BedAt), fmtTimePtr(d.TrainStart), nullInt(d.TrainMinutes),
-		nullStr(d.TrainType), nullInt(d.Energy), nullStr(d.Report), fmtTime(now), d.ID)
+		nullStr(d.TrainType), nullInt(d.Energy), nullStr(d.Report), fmtTime(now), d.ID, uid)
 	if err != nil {
 		return err
 	}
@@ -188,67 +188,80 @@ func updateDay(ctx context.Context, q querier, d *Day, now time.Time) error {
 
 // --- публичные операции ---
 
+// Days — дни одного пользователя. Все запросы ограничены его user_id:
+// чужой день по id не найти и не изменить.
+type Days struct {
+	s   *Store
+	uid int64
+}
+
+// For возвращает дни пользователя uid.
+func (s *Store) For(uid int64) *Days { return &Days{s: s, uid: uid} }
+
+// UserID — чьи это дни.
+func (d *Days) UserID() int64 { return d.uid }
+
 // Get возвращает день по id или ErrNotFound.
-func (s *Store) Get(ctx context.Context, id int64) (*Day, error) {
-	d, err := queryDay(ctx, s.db, `SELECT `+dayCols+` FROM days WHERE id = ?`, id)
-	if err == nil && d == nil {
+func (d *Days) Get(ctx context.Context, id int64) (*Day, error) {
+	day, err := queryDay(ctx, d.s.db, `SELECT `+dayCols+` FROM days WHERE id = ? AND user_id = ?`, id, d.uid)
+	if err == nil && day == nil {
 		err = ErrNotFound
 	}
-	return d, err
+	return day, err
 }
 
 // Latest — самый поздний по подъёму день (nil, если дней нет).
-func (s *Store) Latest(ctx context.Context) (*Day, error) {
-	return queryDay(ctx, s.db, `SELECT `+dayCols+` FROM days ORDER BY wake_at DESC, id DESC LIMIT 1`)
+func (d *Days) Latest(ctx context.Context) (*Day, error) {
+	return queryDay(ctx, d.s.db, `SELECT `+dayCols+` FROM days WHERE user_id = ? ORDER BY wake_at DESC, id DESC LIMIT 1`, d.uid)
 }
 
 // Current — «текущий день»: последний день, если у него ещё нет отбоя; иначе nil.
 // Более старые дни без отбоя (забыли нажать «Лёг») текущими не считаются.
-func (s *Store) Current(ctx context.Context) (*Day, error) {
-	d, err := s.Latest(ctx)
-	if err != nil || d == nil || d.BedAt != nil {
+func (d *Days) Current(ctx context.Context) (*Day, error) {
+	day, err := d.Latest(ctx)
+	if err != nil || day == nil || day.BedAt != nil {
 		return nil, err
 	}
-	return d, nil
+	return day, nil
 }
 
 // Prev — день, предшествующий моменту подъёма t.
-func (s *Store) Prev(ctx context.Context, t time.Time) (*Day, error) {
-	return queryDay(ctx, s.db, `SELECT `+dayCols+` FROM days WHERE wake_at < ? ORDER BY wake_at DESC, id DESC LIMIT 1`, fmtTime(t))
+func (d *Days) Prev(ctx context.Context, t time.Time) (*Day, error) {
+	return queryDay(ctx, d.s.db, `SELECT `+dayCols+` FROM days WHERE user_id = ? AND wake_at < ? ORDER BY wake_at DESC, id DESC LIMIT 1`, d.uid, fmtTime(t))
 }
 
 // Next — следующий день после момента подъёма t.
-func (s *Store) Next(ctx context.Context, t time.Time) (*Day, error) {
-	return queryDay(ctx, s.db, `SELECT `+dayCols+` FROM days WHERE wake_at > ? ORDER BY wake_at ASC, id ASC LIMIT 1`, fmtTime(t))
+func (d *Days) Next(ctx context.Context, t time.Time) (*Day, error) {
+	return queryDay(ctx, d.s.db, `SELECT `+dayCols+` FROM days WHERE user_id = ? AND wake_at > ? ORDER BY wake_at ASC, id ASC LIMIT 1`, d.uid, fmtTime(t))
 }
 
 // Wake создаёт новый день с подъёмом в момент t.
 // Защита от двойного нажатия: если последний день открыт и начат меньше
 // 2 минут назад, возвращается он.
-func (s *Store) Wake(ctx context.Context, t time.Time) (*Day, error) {
-	if last, err := s.Latest(ctx); err != nil {
+func (d *Days) Wake(ctx context.Context, t time.Time) (*Day, error) {
+	if last, err := d.Latest(ctx); err != nil {
 		return nil, err
 	} else if last != nil && last.BedAt == nil && t.Sub(last.WakeAt) >= 0 && t.Sub(last.WakeAt) < 2*time.Minute {
 		return last, nil
 	}
-	d := &Day{WakeAt: t.UTC().Truncate(time.Second)}
-	if err := insertDay(ctx, s.db, d, s.now()); err != nil {
+	day := &Day{WakeAt: t.UTC().Truncate(time.Second)}
+	if err := insertDay(ctx, d.s.db, d.uid, day, d.s.now()); err != nil {
 		return nil, err
 	}
-	return d, nil
+	return day, nil
 }
 
 // Save записывает все поля дня.
-func (s *Store) Save(ctx context.Context, d *Day) error {
-	if err := d.Validate(); err != nil {
+func (d *Days) Save(ctx context.Context, day *Day) error {
+	if err := day.Validate(); err != nil {
 		return &InputError{err}
 	}
-	return updateDay(ctx, s.db, d, s.now())
+	return updateDay(ctx, d.s.db, d.uid, day, d.s.now())
 }
 
 // Delete удаляет день.
-func (s *Store) Delete(ctx context.Context, id int64) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM days WHERE id = ?`, id)
+func (d *Days) Delete(ctx context.Context, id int64) error {
+	res, err := d.s.db.ExecContext(ctx, `DELETE FROM days WHERE id = ? AND user_id = ?`, id, d.uid)
 	if err != nil {
 		return err
 	}
@@ -259,8 +272,8 @@ func (s *Store) Delete(ctx context.Context, id int64) error {
 }
 
 // Page — страница истории (новые сверху) с вычисленным сном.
-func (s *Store) Page(ctx context.Context, limit, offset int) ([]Entry, error) {
-	desc, err := queryDays(ctx, s.db, `SELECT `+dayCols+` FROM days ORDER BY wake_at DESC, id DESC LIMIT ? OFFSET ?`, limit, offset)
+func (d *Days) Page(ctx context.Context, limit, offset int) ([]Entry, error) {
+	desc, err := queryDays(ctx, d.s.db, `SELECT `+dayCols+` FROM days WHERE user_id = ? ORDER BY wake_at DESC, id DESC LIMIT ? OFFSET ?`, d.uid, limit, offset)
 	if err != nil || len(desc) == 0 {
 		return nil, err
 	}
@@ -268,7 +281,7 @@ func (s *Store) Page(ctx context.Context, limit, offset int) ([]Entry, error) {
 	for i := range desc {
 		asc[len(desc)-1-i] = desc[i]
 	}
-	prev, err := s.Prev(ctx, asc[0].WakeAt)
+	prev, err := d.Prev(ctx, asc[0].WakeAt)
 	if err != nil {
 		return nil, err
 	}
@@ -280,18 +293,18 @@ func (s *Store) Page(ctx context.Context, limit, offset int) ([]Entry, error) {
 }
 
 // Count — сколько всего дней.
-func (s *Store) Count(ctx context.Context) (int, error) {
+func (d *Days) Count(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM days`).Scan(&n)
+	err := d.s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM days WHERE user_id = ?`, d.uid).Scan(&n)
 	return n, err
 }
 
 // Range — дни с подъёмом в [from, to) по возрастанию, с вычисленным сном.
 // Нулевые from/to означают «без границы». Для первого дня сон считается
 // по дню, предшествующему диапазону.
-func (s *Store) Range(ctx context.Context, from, to time.Time) ([]Entry, error) {
-	q := `SELECT ` + dayCols + ` FROM days WHERE 1=1`
-	var args []any
+func (d *Days) Range(ctx context.Context, from, to time.Time) ([]Entry, error) {
+	q := `SELECT ` + dayCols + ` FROM days WHERE user_id = ?`
+	args := []any{d.uid}
 	if !from.IsZero() {
 		q += ` AND wake_at >= ?`
 		args = append(args, fmtTime(from))
@@ -301,31 +314,31 @@ func (s *Store) Range(ctx context.Context, from, to time.Time) ([]Entry, error) 
 		args = append(args, fmtTime(to))
 	}
 	q += ` ORDER BY wake_at ASC, id ASC`
-	days, err := queryDays(ctx, s.db, q, args...)
+	days, err := queryDays(ctx, d.s.db, q, args...)
 	if err != nil || len(days) == 0 {
 		return nil, err
 	}
-	prev, err := s.Prev(ctx, days[0].WakeAt)
+	prev, err := d.Prev(ctx, days[0].WakeAt)
 	if err != nil {
 		return nil, err
 	}
 	return WithSleep(prev, days), nil
 }
 
-// SleepBefore — сон перед днём d.
-func (s *Store) SleepBefore(ctx context.Context, d *Day) (*time.Duration, error) {
-	prev, err := s.Prev(ctx, d.WakeAt)
+// SleepBefore — сон перед днём day.
+func (d *Days) SleepBefore(ctx context.Context, day *Day) (*time.Duration, error) {
+	prev, err := d.Prev(ctx, day.WakeAt)
 	if err != nil {
 		return nil, err
 	}
-	return SleepBetween(prev, d), nil
+	return SleepBetween(prev, day), nil
 }
 
 // TrainTypes — ранее использованные типы тренировок, недавние первыми.
-func (s *Store) TrainTypes(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT train_type FROM days
-		WHERE train_type IS NOT NULL AND train_type <> ''
-		GROUP BY train_type ORDER BY MAX(wake_at) DESC LIMIT 30`)
+func (d *Days) TrainTypes(ctx context.Context) ([]string, error) {
+	rows, err := d.s.db.QueryContext(ctx, `SELECT train_type FROM days
+		WHERE user_id = ? AND train_type IS NOT NULL AND train_type <> ''
+		GROUP BY train_type ORDER BY MAX(wake_at) DESC LIMIT 30`, d.uid)
 	if err != nil {
 		return nil, err
 	}

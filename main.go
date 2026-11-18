@@ -18,16 +18,19 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 	_ "time/tzdata" // зоны часовых поясов внутри бинарника (на Windows их нет в системе)
 
 	"lifelog/internal/store"
+	"lifelog/internal/tg"
 	"lifelog/internal/web"
 )
 
 // envKeys — все переменные окружения, которые читает приложение.
-var envKeys = []string{"ADDR", "DB_PATH", "TZ", "BACKUP_DIR", "BACKUP_KEEP", "BASIC_AUTH_USER", "BASIC_AUTH_PASS"}
+var envKeys = []string{"ADDR", "DB_PATH", "TZ", "BACKUP_DIR", "BACKUP_KEEP", "BASIC_AUTH_USER", "BASIC_AUTH_PASS",
+	"BOT_TOKEN", "ALLOWED_USERS", "WEBAPP_URL"}
 
 type config struct {
 	Addr       string
@@ -37,6 +40,9 @@ type config struct {
 	BackupKeep int
 	AuthUser   string
 	AuthPass   string
+	BotToken   string       // включает вход через Telegram Mini App
+	Allowed    tg.Allowlist // ALLOWED_USERS: id и/или @username через запятую
+	WebAppURL  string       // WEBAPP_URL: адрес приложения для кнопок бота
 }
 
 func env(key, def string) string {
@@ -48,11 +54,20 @@ func env(key, def string) string {
 
 func loadConfig() (config, error) {
 	c := config{
-		Addr:     env("ADDR", "127.0.0.1:8080"),
-		DBPath:   env("DB_PATH", defaultDBPath()),
-		Loc:      time.Local,
-		AuthUser: os.Getenv("BASIC_AUTH_USER"),
-		AuthPass: os.Getenv("BASIC_AUTH_PASS"),
+		Addr:      env("ADDR", "127.0.0.1:8080"),
+		DBPath:    env("DB_PATH", defaultDBPath()),
+		Loc:       time.Local,
+		AuthUser:  os.Getenv("BASIC_AUTH_USER"),
+		AuthPass:  os.Getenv("BASIC_AUTH_PASS"),
+		BotToken:  strings.TrimSpace(os.Getenv("BOT_TOKEN")),
+		Allowed:   tg.ParseAllowlist(tg.SplitList(os.Getenv("ALLOWED_USERS"))),
+		WebAppURL: strings.TrimSpace(os.Getenv("WEBAPP_URL")),
+	}
+	if c.BotToken != "" && c.Allowed.Len() == 0 {
+		return c, fmt.Errorf("BOT_TOKEN задан, а ALLOWED_USERS пуст — войти не сможет никто")
+	}
+	if c.WebAppURL != "" && !strings.HasPrefix(c.WebAppURL, "https://") {
+		return c, fmt.Errorf("WEBAPP_URL должен начинаться с https:// (требование Telegram)")
 	}
 	if tz := os.Getenv("TZ"); tz != "" {
 		loc, err := time.LoadLocation(tz)
@@ -132,16 +147,30 @@ func run(ctx context.Context, cfg config) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go st.BackupLoop(ctx, cfg.BackupDir, cfg.BackupKeep, log.Printf)
+	if cfg.BotToken != "" && cfg.WebAppURL != "" {
+		bot := &tg.Bot{Token: cfg.BotToken, WebAppURL: cfg.WebAppURL, Allow: cfg.Allowed, Logf: log.Printf}
+		go bot.Run(ctx)
+	}
 
 	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           web.New(st, web.Options{AuthUser: cfg.AuthUser, AuthPass: cfg.AuthPass}),
+		Addr: cfg.Addr,
+		Handler: web.New(st, web.Options{
+			AuthUser: cfg.AuthUser, AuthPass: cfg.AuthPass,
+			BotToken: cfg.BotToken, Allow: cfg.Allowed,
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
-	log.Printf("lifelog: http://%s  db=%s  tz=%s", cfg.Addr, cfg.DBPath, cfg.Loc)
+	auth := "без входа"
+	if cfg.BotToken != "" {
+		auth = fmt.Sprintf("Telegram, разрешено записей: %d", cfg.Allowed.Len())
+		if cfg.WebAppURL == "" {
+			auth += ", бот выключен (нет WEBAPP_URL)"
+		}
+	}
+	log.Printf("lifelog: http://%s  db=%s  tz=%s  вход: %s", cfg.Addr, cfg.DBPath, cfg.Loc, auth)
 
 	select {
 	case err := <-errc:

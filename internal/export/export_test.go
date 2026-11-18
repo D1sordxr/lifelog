@@ -30,7 +30,7 @@ func importCSV(t *testing.T, s *store.Store, csv string) store.ImportResult {
 	if err != nil || len(perr) > 0 {
 		t.Fatalf("parse: %v %v", err, perr)
 	}
-	res, err := s.Import(context.Background(), rows)
+	res, err := s.For(1).Import(context.Background(), rows)
 	if err != nil || len(res.Errors) > 0 {
 		t.Fatalf("import: %v %v", err, res.Errors)
 	}
@@ -50,7 +50,7 @@ func TestImportTimeOnlyAndSleep(t *testing.T) {
 	if res.Added != 3 || res.Updated != 0 {
 		t.Fatalf("result %+v", res)
 	}
-	e, err := s.Range(ctx, time.Time{}, time.Time{})
+	e, err := s.For(1).Range(ctx, time.Time{}, time.Time{})
 	if err != nil || len(e) != 3 {
 		t.Fatalf("range: %v %v", e, err)
 	}
@@ -73,7 +73,7 @@ func TestImportTimeOnlyAndSleep(t *testing.T) {
 	if res.Added != 0 || res.Updated != 1 {
 		t.Fatalf("reimport %+v", res)
 	}
-	d, _ := s.Range(ctx, time.Time{}, time.Time{})
+	d, _ := s.For(1).Range(ctx, time.Time{}, time.Time{})
 	if *d[0].Energy != 5 || d[0].TrainType != "бег" || d[0].WakeAt.In(tz).Format("15:04") != "06:50" {
 		t.Fatalf("after update: %+v", d[0].Day)
 	}
@@ -83,7 +83,7 @@ func TestCSVRoundTrip(t *testing.T) {
 	a := openTest(t)
 	ctx := context.Background()
 	importCSV(t, a, legacy)
-	src, _ := a.Range(ctx, time.Time{}, time.Time{})
+	src, _ := a.For(1).Range(ctx, time.Time{}, time.Time{})
 
 	var buf bytes.Buffer
 	if err := WriteCSV(&buf, src, tz); err != nil {
@@ -95,7 +95,7 @@ func TestCSVRoundTrip(t *testing.T) {
 
 	b := openTest(t)
 	importCSV(t, b, buf.String())
-	dst, _ := b.Range(ctx, time.Time{}, time.Time{})
+	dst, _ := b.For(1).Range(ctx, time.Time{}, time.Time{})
 	if len(dst) != len(src) {
 		t.Fatalf("len %d != %d", len(dst), len(src))
 	}
@@ -114,7 +114,7 @@ func TestMarkdownAndJSON(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
 	importCSV(t, s, legacy)
-	e, _ := s.Range(ctx, time.Time{}, time.Time{})
+	e, _ := s.For(1).Range(ctx, time.Time{}, time.Time{})
 
 	var md bytes.Buffer
 	WriteMarkdown(&md, e, tz)
@@ -169,11 +169,11 @@ func TestParseErrors(t *testing.T) {
 	// Ошибка валидации в одной строке → не импортируется ничего.
 	s := openTest(t)
 	rows, _, _ = ParseCSV(strings.NewReader("date,wake_at,energy\n2026-11-17,07:00,3\n2026-11-18,07:00,9\n"), tz)
-	res, err := s.Import(context.Background(), rows)
+	res, err := s.For(1).Import(context.Background(), rows)
 	if err != nil || len(res.Errors) != 1 {
 		t.Fatalf("want 1 error, got %v %v", res, err)
 	}
-	if n, _ := s.Count(context.Background()); n != 0 {
+	if n, _ := s.For(1).Count(context.Background()); n != 0 {
 		t.Fatalf("partial import: %d days", n)
 	}
 }

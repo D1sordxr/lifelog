@@ -17,8 +17,27 @@
   --grid-mid: #c9c9cf;
   color-scheme: light dark;
 }
+/* Тёмная тема: по системе или по теме Telegram (data-theme ставит JS). */
+:root[data-theme=dark] {
+  --bg: #1f1f1f;
+  --card: #2b2b2b;
+  --text: #e8e8e8;
+  --muted: #9d9da3;
+  --line: #3d3d40;
+  --field: #232323;
+  --btn: #3a3a3d;
+  --btn-press: #47474b;
+  --accent: #5b8cf0;
+  --accent-text: #ffffff;
+  --ok: #66bb6a;
+  --err: #ef6c6c;
+  --sleep: #7896dc;
+  --grid: #363639;
+  --grid-mid: #505055;
+  color-scheme: dark;
+}
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme=light]) {
     --bg: #1f1f1f;
     --card: #2b2b2b;
     --text: #e8e8e8;
@@ -36,6 +55,7 @@
     --grid-mid: #505055;
   }
 }
+:root[data-theme=light] { color-scheme: light; }
 
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }

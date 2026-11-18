@@ -116,7 +116,7 @@ func (s *service) Execute(_ []string, req <-chan svc.ChangeRequest, status chan<
 // запускает службу. Запускать из терминала администратора.
 //
 // Переменные из envKeys, заданные в текущем окружении, сохраняются в
-// настройки службы; если ни одна не задана — прежние настройки не меняются.
+// настройки службы поверх прежних (остальные не меняются; "-" — удалить).
 func install() error {
 	m, err := mgr.Connect()
 	if err != nil {
@@ -247,26 +247,49 @@ const serviceKey = `SYSTEM\CurrentControlSet\Services\` + serviceName
 
 // saveServiceEnv пишет заданные переменные в значение Environment службы.
 func saveServiceEnv() error {
-	var vars []string
+	// Слияние с прежними настройками: заданные сейчас переменные заменяют старые,
+	// остальные сохраняются; значение "-" удаляет переменную.
+	vars := serviceEnv()
+	changed := false
 	for _, k := range envKeys {
-		if v, ok := os.LookupEnv(k); ok && v != "" {
-			vars = append(vars, k+"="+v)
+		v, ok := os.LookupEnv(k)
+		if !ok || v == "" {
+			continue
+		}
+		changed = true
+		if v == "-" {
+			delete(vars, k)
+		} else {
+			vars[k] = v
 		}
 	}
-	if len(vars) == 0 {
+	if !changed {
 		return nil
+	}
+	var list []string
+	for _, k := range envKeys {
+		if v, ok := vars[k]; ok {
+			list = append(list, k+"="+v)
+		}
 	}
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE, serviceKey, registry.SET_VALUE)
 	if err != nil {
 		return fmt.Errorf("реестр: %w", err)
 	}
 	defer key.Close()
-	if err := key.SetStringsValue("Environment", vars); err != nil {
+	if len(list) == 0 {
+		err = key.DeleteValue("Environment")
+	} else {
+		err = key.SetStringsValue("Environment", list)
+	}
+	if err != nil {
 		return fmt.Errorf("реестр: %w", err)
 	}
-	for _, v := range vars {
-		if strings.HasPrefix(v, "BASIC_AUTH_PASS=") {
-			v = "BASIC_AUTH_PASS=***"
+	for _, v := range list {
+		for _, secret := range []string{"BASIC_AUTH_PASS=", "BOT_TOKEN="} {
+			if strings.HasPrefix(v, secret) {
+				v = secret + "***"
+			}
 		}
 		fmt.Println("env:", v)
 	}

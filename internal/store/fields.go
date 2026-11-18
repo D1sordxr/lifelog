@@ -129,45 +129,45 @@ func (d *Day) Validate() error {
 }
 
 // SetField меняет одно поле дня и сохраняет. Возвращает обновлённый день.
-func (s *Store) SetField(ctx context.Context, id int64, name, value string) (*Day, error) {
+func (d *Days) SetField(ctx context.Context, id int64, name, value string) (*Day, error) {
 	f, ok := FieldByName(name)
 	if !ok {
 		return nil, &InputError{fmt.Errorf("неизвестное поле %q", name)}
 	}
-	d, err := s.Get(ctx, id)
+	day, err := d.Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if err := f.Set(d, value, s.loc, s.now()); err != nil {
+	if err := f.Set(day, value, d.s.loc, d.s.now()); err != nil {
 		return nil, &InputError{err}
 	}
-	if err := s.Save(ctx, d); err != nil {
+	if err := d.Save(ctx, day); err != nil {
 		return nil, err
 	}
-	return d, nil
+	return day, nil
 }
 
 // SetFields меняет несколько полей за раз (сохранение формы без JS).
 // Поля, которых нет в values, не трогаются.
-func (s *Store) SetFields(ctx context.Context, id int64, values map[string]string) (*Day, error) {
-	d, err := s.Get(ctx, id)
+func (d *Days) SetFields(ctx context.Context, id int64, values map[string]string) (*Day, error) {
+	day, err := d.Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	now := s.now()
+	now := d.s.now()
 	for _, f := range Fields {
 		v, ok := values[f.Name]
 		if !ok {
 			continue
 		}
-		if err := f.Set(d, v, s.loc, now); err != nil {
+		if err := f.Set(day, v, d.s.loc, now); err != nil {
 			return nil, &InputError{fmt.Errorf("%s: %w", f.Name, err)}
 		}
 	}
-	if err := s.Save(ctx, d); err != nil {
+	if err := d.Save(ctx, day); err != nil {
 		return nil, err
 	}
-	return d, nil
+	return day, nil
 }
 
 func parseTime(v string, loc *time.Location, now time.Time) (*time.Time, error) {

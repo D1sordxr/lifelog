@@ -37,7 +37,7 @@ func (s *Server) chart(w http.ResponseWriter, r *http.Request) {
 	today := s.opt.Now().In(s.loc)
 	start := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, s.loc).AddDate(0, 0, -(n - 1))
 	end := start.AddDate(0, 0, n)
-	entries, err := s.st.Range(r.Context(), start, end)
+	entries, err := s.days(r).Range(r.Context(), start, end)
 	if err != nil {
 		s.fail(w, err)
 		return

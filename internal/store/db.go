@@ -28,7 +28,9 @@ type Store struct {
 // loc — часовой пояс, в котором определяется «дата дня» и разбирается ввод.
 func Open(path string, loc *time.Location) (*Store, error) {
 	// Параметры после '?' modernc.org/sqlite срезает с пути и применяет как PRAGMA.
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)"
+	// _txlock=immediate: транзакции сразу берут блокировку записи — без гонок
+	// между процессами (например, две копии при старте мигрируют одну базу).
+	dsn := path + "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -36,7 +38,16 @@ func Open(path string, loc *time.Location) (*Store, error) {
 	// Один пользователь, нагрузка мизерная: одно соединение исключает
 	// любые SQLITE_BUSY между запросами самого приложения.
 	db.SetMaxOpenConns(1)
-	if err := db.Ping(); err != nil {
+	// Переключение новой базы в WAL при одновременном открытии из двух
+	// процессов отдаёт SQLITE_BUSY сразу, минуя busy_timeout, — повторяем.
+	for i := 0; ; i++ {
+		err = db.Ping()
+		if err == nil || i == 100 || !strings.Contains(err.Error(), "SQLITE_BUSY") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
@@ -113,6 +124,15 @@ func (s *Store) migrate() error {
 		tx, err := s.db.Begin()
 		if err != nil {
 			return err
+		}
+		var done int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, m.version).Scan(&done); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if done > 0 { // успел применить другой процесс
+			tx.Rollback()
+			continue
 		}
 		if _, err := tx.Exec(string(body)); err != nil {
 			tx.Rollback()

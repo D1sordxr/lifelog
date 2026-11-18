@@ -23,8 +23,9 @@ type ImportResult struct {
 // Import применяет строки в одной транзакции. День сопоставляется по дате
 // подъёма (локальной): если такой уже есть — обновляются только поля, непустые
 // в строке; иначе создаётся новый. При любой ошибке не применяется ничего.
-func (s *Store) Import(ctx context.Context, rows []ImportRow) (ImportResult, error) {
+func (ds *Days) Import(ctx context.Context, rows []ImportRow) (ImportResult, error) {
 	var res ImportResult
+	s := ds.s
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return res, err
@@ -34,8 +35,8 @@ func (s *Store) Import(ctx context.Context, rows []ImportRow) (ImportResult, err
 
 	for _, r := range rows {
 		from, to, _ := DayBounds(r.WakeAt.In(s.loc).Format("2006-01-02"), s.loc)
-		d, err := queryDay(ctx, tx, `SELECT `+dayCols+` FROM days WHERE wake_at >= ? AND wake_at < ? ORDER BY wake_at, id LIMIT 1`,
-			fmtTime(from), fmtTime(to))
+		d, err := queryDay(ctx, tx, `SELECT `+dayCols+` FROM days WHERE user_id = ? AND wake_at >= ? AND wake_at < ? ORDER BY wake_at, id LIMIT 1`,
+			ds.uid, fmtTime(from), fmtTime(to))
 		if err != nil {
 			return res, err
 		}
@@ -62,10 +63,10 @@ func (s *Store) Import(ctx context.Context, rows []ImportRow) (ImportResult, err
 			continue
 		}
 		if isNew {
-			err = insertDay(ctx, tx, d, now)
+			err = insertDay(ctx, tx, ds.uid, d, now)
 			res.Added++
 		} else {
-			err = updateDay(ctx, tx, d, now)
+			err = updateDay(ctx, tx, ds.uid, d, now)
 			res.Updated++
 		}
 		if err != nil {

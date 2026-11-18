@@ -2,6 +2,22 @@
 (function () {
   "use strict";
 
+  // --- Telegram Mini App ---
+  try { sessionStorage.removeItem("lifelog-auth-tried"); } catch (e) {}
+  var tg = window.Telegram && window.Telegram.WebApp;
+  if (!(tg && tg.initData)) tg = null;
+  if (tg) {
+    tg.ready();
+    tg.expand();
+    tg.onEvent("themeChanged", function () { document.documentElement.dataset.theme = tg.colorScheme; });
+    if (location.pathname !== "/" && tg.BackButton) {
+      tg.BackButton.show();
+      tg.BackButton.onClick(function () {
+        if (history.length > 1) history.back(); else location.href = "/";
+      });
+    }
+  }
+
   function flash(st, text, cls) {
     if (!st) return;
     st.textContent = text;
@@ -98,12 +114,38 @@
   // Если форма уже отправляется (кнопки «Встал»/«Лёг»), не даём нажать дважды.
   document.querySelectorAll("form:not(.day)").forEach(function (f) {
     f.addEventListener("submit", function (e) {
-      if (f.dataset.confirm && !confirm(f.dataset.confirm)) { e.preventDefault(); return; }
+      if (f.dataset.confirm) {
+        if (tg && tg.isVersionAtLeast("6.2")) {
+          e.preventDefault();
+          tg.showConfirm(f.dataset.confirm, function (ok) { if (ok) f.submit(); });
+          return;
+        }
+        if (!confirm(f.dataset.confirm)) { e.preventDefault(); return; }
+      }
       if (f.method.toLowerCase() === "post") {
         f.querySelectorAll("button").forEach(function (b) { setTimeout(function () { b.disabled = true; }, 0); });
       }
     });
   });
+
+  // Экспорт внутри Telegram: файл качает сам клиент Telegram (без cookie),
+  // поэтому берём у сервера короткоживущий токен для ссылки.
+  var exportForm = document.querySelector("form.export");
+  if (exportForm && tg && tg.isVersionAtLeast("8.0")) {
+    exportForm.addEventListener("submit", function (e) {
+      var btn = e.submitter;
+      if (!btn || !btn.formAction) return;
+      e.preventDefault();
+      var path = new URL(btn.formAction).pathname; // /export.md
+      fetch("/auth/download", { method: "POST", credentials: "same-origin" })
+        .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+        .then(function (j) {
+          var q = new URLSearchParams({ from: exportForm.elements.from.value, to: exportForm.elements.to.value, dl: j.token });
+          tg.downloadFile({ url: location.origin + path + "?" + q, file_name: "lifelog" + path.replace("/export", "") });
+        })
+        .catch(function (err) { tg.showAlert("Не удалось скачать: " + err.message); });
+    });
+  }
 
   // Копирование Markdown в буфер обмена.
   var copyBtn = document.querySelector("[data-copy-md]");
